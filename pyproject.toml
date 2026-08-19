@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rem-bubbles"
+version = "0.1.0"
+description = "A tiny persistent desktop quote and reminder companion for Wayland."
+readme = "README.md"
+requires-python = ">=3.11"
+
+# GTK4, PyGObject and gtk4-layer-shell are provided by the system (the venv is
+# created with --system-site-packages). They are deliberately not listed here:
+# pip would try to build PyGObject from source instead of using the distro one.
+dependencies = []
+
+[project.scripts]
+rem-bubbles = "rem_bubbles.app:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environment
+.venv/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Local user data
+/data/
+/quotes.json
+/reminders.json
+/state.json
+
+# Misc
+.DS_Store
+*.log

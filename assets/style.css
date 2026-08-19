@@ -1,0 +1,101 @@
+/* REM Bubbles — dark forest / tiger desktop aesthetic.
+ *
+ * Palette:
+ *   forest   #12191500  ..  rgba(18, 25, 21, 0.88)
+ *   cream    #ece5d8
+ *   orange   #e0873c
+ *   green    #7fa882
+ */
+
+/* The layer-shell surface itself must be fully transparent so only the bubble
+ * or the card is visible — no opaque application rectangle behind them. */
+window.rem-window,
+window.rem-window > widget,
+.rem-window {
+  background: none;
+  background-color: transparent;
+  box-shadow: none;
+  border: none;
+}
+
+/* --- collapsed bubble ---------------------------------------------------- */
+
+.rem-bubble {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  margin: 0;
+
+  border-radius: 999px;
+  border: 1px solid rgba(224, 135, 60, 0.55);
+  background-color: rgba(18, 25, 21, 0.88);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+
+  color: #e0873c;
+  font-size: 11px;
+  text-shadow: none;
+
+  transition: background-color 120ms ease-out, border-color 120ms ease-out;
+}
+
+.rem-bubble:hover {
+  background-color: rgba(30, 44, 35, 0.94);
+  border-color: rgba(127, 168, 130, 0.85);
+  color: #7fa882;
+}
+
+.rem-bubble:active {
+  background-color: rgba(40, 58, 46, 0.96);
+}
+
+/* --- expanded quote card ------------------------------------------------- */
+
+.rem-card {
+  min-width: 280px;
+  padding: 14px 16px;
+
+  border-radius: 14px;
+  border: 1px solid rgba(127, 168, 130, 0.30);
+  background-color: rgba(18, 25, 21, 0.97);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.50);
+
+  color: #ece5d8;
+}
+
+.rem-heading {
+  color: #e0873c;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+}
+
+.rem-quote {
+  color: #ece5d8;
+  font-size: 13px;
+  font-style: italic;
+  padding-bottom: 2px;
+}
+
+.rem-collapse {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0;
+  margin: 0;
+
+  border-radius: 999px;
+  border: none;
+  background-color: transparent;
+  color: rgba(236, 229, 216, 0.55);
+  font-size: 13px;
+
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.rem-collapse:hover {
+  background-color: rgba(224, 135, 60, 0.18);
+  color: #e0873c;
+}
+
+.rem-collapse:active {
+  background-color: rgba(224, 135, 60, 0.28);
+}
