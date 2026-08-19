@@ -1,0 +1,52 @@
+[
+  {
+    "id": "keep-making-weird-things",
+    "text": "Keep making weird things.",
+    "author": null,
+    "enabled": true
+  },
+  {
+    "id": "build-for-yourself",
+    "text": "Build things you would actually want on your own computer.",
+    "author": null,
+    "enabled": true
+  },
+  {
+    "id": "small-progress-compounds",
+    "text": "Small progress still compounds.",
+    "author": null,
+    "enabled": true
+  },
+  {
+    "id": "finish-the-simple-version",
+    "text": "Finish the simple version first.",
+    "author": null,
+    "enabled": true
+  },
+  {
+    "id": "curiosity-is-enough",
+    "text": "Curiosity is a valid reason to build something."
+  },
+  {
+    "id": "read-the-error",
+    "text": "Read the error message before guessing.",
+    "author": "REM Bubbles"
+  },
+  {
+    "id": "one-thing-at-a-time",
+    "text": "One thing at a time, all the way to done.",
+    "author": ""
+  },
+  {
+    "id": "rest-is-part-of-the-work",
+    "text": "Rest is part of the work, not a break from it.",
+    "author": null,
+    "enabled": true
+  },
+  {
+    "id": "example-disabled",
+    "text": "This quote is disabled and should never be shown.",
+    "author": "Example",
+    "enabled": false
+  }
+]

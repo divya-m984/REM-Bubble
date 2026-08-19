@@ -16,8 +16,7 @@ gi.require_version("Gtk4LayerShell", "1.0")
 from gi.repository import Gtk
 from gi.repository import Gtk4LayerShell as LayerShell
 
-#: Hard-coded for Milestone 1. Quote loading arrives in a later milestone.
-PLACEHOLDER_QUOTE = "Keep making weird things."
+from rem_bubbles.quote_store import Quote, QuoteStore
 
 #: Glyph shown in the collapsed state.
 BUBBLE_GLYPH = "●"  # ●
@@ -31,15 +30,24 @@ LAYER_NAMESPACE = "rem-bubbles"
 
 
 class BubbleWindow(Gtk.ApplicationWindow):
-    """A tiny always-on-top overlay that toggles between bubble and card."""
+    """A tiny always-on-top overlay that toggles between bubble and card.
+
+    The window renders whatever quote the :class:`~rem_bubbles.quote_store.QuoteStore`
+    it was given currently points at; it never reads JSON itself. The cursor
+    lives in the store, so collapsing and re-expanding redisplays the same
+    quote rather than snapping back to today's.
+    """
 
     def __init__(
         self,
         application: Gtk.Application,
+        store: QuoteStore,
         margin_top: int = DEFAULT_MARGIN_TOP,
         margin_left: int = DEFAULT_MARGIN_LEFT,
     ) -> None:
         super().__init__(application=application, title="REM Bubbles")
+
+        self._store = store
 
         self.set_decorated(False)
         self.set_resizable(False)
@@ -50,6 +58,8 @@ class BubbleWindow(Gtk.ApplicationWindow):
         self._bubble = self._build_bubble()
         self._card = self._build_card()
         self._expanded = False
+
+        self._show_quote(self._store.current)
 
         self.set_child(self._bubble)
 
@@ -109,15 +119,79 @@ class BubbleWindow(Gtk.ApplicationWindow):
 
         card.append(header)
 
-        quote = Gtk.Label(label=PLACEHOLDER_QUOTE)
-        quote.add_css_class("rem-quote")
-        quote.set_xalign(0.0)
-        quote.set_wrap(True)
-        quote.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        quote.set_max_width_chars(34)
-        card.append(quote)
+        self._quote_label = Gtk.Label()
+        self._quote_label.add_css_class("rem-quote")
+        self._quote_label.set_xalign(0.0)
+        self._quote_label.set_wrap(True)
+        self._quote_label.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self._quote_label.set_max_width_chars(34)
+        card.append(self._quote_label)
+
+        # Hidden rather than blank when a quote is unattributed, so the card
+        # closes up instead of leaving an empty byline row.
+        self._author_label = Gtk.Label()
+        self._author_label.add_css_class("rem-author")
+        self._author_label.set_xalign(0.0)
+        self._author_label.set_wrap(True)
+        self._author_label.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self._author_label.set_max_width_chars(34)
+        card.append(self._author_label)
+
+        card.append(self._build_nav())
 
         return card
+
+    def _build_nav(self) -> Gtk.Widget:
+        nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        nav.add_css_class("rem-nav")
+        nav.set_halign(Gtk.Align.CENTER)
+
+        previous = Gtk.Button(label="‹")  # ‹
+        previous.add_css_class("rem-nav-button")
+        previous.set_has_frame(False)
+        previous.set_tooltip_text("Previous quote")
+        previous.connect("clicked", lambda _button: self.show_previous_quote())
+        nav.append(previous)
+
+        next_ = Gtk.Button(label="›")  # ›
+        next_.add_css_class("rem-nav-button")
+        next_.set_has_frame(False)
+        next_.set_tooltip_text("Next quote")
+        next_.connect("clicked", lambda _button: self.show_next_quote())
+        nav.append(next_)
+
+        # Nothing to navigate to with a single quote (e.g. the emergency one).
+        navigable = len(self._store) > 1
+        previous.set_sensitive(navigable)
+        next_.set_sensitive(navigable)
+
+        return nav
+
+    # -- quote presentation -----------------------------------------------
+
+    def _show_quote(self, quote: Quote) -> None:
+        self._quote_label.set_label(quote.text)
+
+        if quote.author:
+            self._author_label.set_label(f"— {quote.author}")  # —
+            self._author_label.set_visible(True)
+        else:
+            self._author_label.set_label("")
+            self._author_label.set_visible(False)
+
+    def show_next_quote(self) -> None:
+        self._show_quote(self._store.next())
+        self._resize_to_content()
+
+    def show_previous_quote(self) -> None:
+        self._show_quote(self._store.previous())
+        self._resize_to_content()
+
+    def _resize_to_content(self) -> None:
+        # A shorter quote would otherwise keep the taller surface committed by
+        # the previous one.
+        if self._expanded:
+            self.set_default_size(-1, -1)
 
     # -- state transitions ------------------------------------------------
 
