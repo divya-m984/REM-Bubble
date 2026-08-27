@@ -1,0 +1,15 @@
+# Example REM Bubbles configuration.
+#
+# The real one lives at ~/.config/rem-bubbles/config.toml (or
+# $XDG_CONFIG_HOME/rem-bubbles/config.toml). Create it with:
+#
+#     rem-bubbles init
+#
+# This file is tracked sample data. It is not read at runtime.
+
+[quotes]
+# Where your personal quotes live. A relative path is resolved against the
+# directory holding this config file, so the default means
+# ~/.config/rem-bubbles/quotes.json. An absolute path or one starting with ~
+# is also accepted, for keeping quotes somewhere else entirely.
+file = "quotes.json"

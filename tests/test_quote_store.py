@@ -5,10 +5,12 @@ Nothing here touches GTK, Wayland or a display server — ``quote_store`` and
 """
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 from rem_bubbles.config import quote_file_candidates
 from rem_bubbles.quote_store import (
@@ -333,6 +335,20 @@ class LookupTests(unittest.TestCase):
 
 
 class QuoteSourceTests(unittest.TestCase):
+    """The repository half of the fallback chain.
+
+    Each test runs against an empty temporary ``XDG_CONFIG_HOME`` so that the
+    real ``~/.config/rem-bubbles`` is neither read nor able to change the
+    outcome. The user-config half of the chain is covered by ``test_config``.
+    """
+
+    def setUp(self):
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self._temp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_explicit_path_wins_and_is_the_only_candidate(self):
         self.assertEqual(quote_file_candidates("/some/where.json"), (Path("/some/where.json"),))
 

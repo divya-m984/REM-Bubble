@@ -1,26 +1,43 @@
-"""Quote data: parsing, validation, daily selection and navigation.
+"""Quote data: parsing, validation, daily selection, navigation and persistence.
 
 This module is deliberately free of GTK — it holds no widgets and imports no
 ``gi``, so it can be unit-tested without a display server. The graphical layer
 reads from a :class:`QuoteStore`; it never touches JSON itself.
+
+It owns both directions of the on-disk format. Reading is
+:func:`decode_quotes` / :func:`load_quotes`; writing is :func:`write_quotes`,
+which serialises, re-validates its own output and only then replaces the
+destination. Keeping both here means the schema has exactly one home.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import date
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 __all__ = [
     "EMERGENCY_QUOTE",
     "Quote",
     "QuoteStore",
     "QuoteStoreError",
+    "decode_quotes",
+    "load_quotes",
     "parse_quotes",
+    "quote_to_dict",
+    "quotes_to_json",
+    "write_quotes",
+    "write_text_atomic",
 ]
+
+#: Permissions for freshly created personal data. Existing files keep theirs.
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_DIR_MODE = 0o700
 
 
 class QuoteStoreError(Exception):
@@ -130,6 +147,117 @@ def parse_quotes(raw: Any, source: str | None = None) -> list[Quote]:
     return quotes
 
 
+def decode_quotes(text: str, source: str | None = None) -> list[Quote]:
+    """Parse JSON ``text`` into quotes, without the "must have one enabled" rule.
+
+    :class:`QuoteStore` needs at least one enabled quote because it has to be
+    able to display something. Quote *management* has no such requirement — a
+    collection may legitimately be inspected while every entry is disabled — so
+    the CLI reads through here instead of constructing a store.
+    """
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise QuoteStoreError(
+            f"The quote file{_where(source)} is not valid JSON: {exc.msg} "
+            f"(line {exc.lineno}, column {exc.colno})."
+        ) from exc
+    return parse_quotes(raw, source)
+
+
+def load_quotes(path: Path | str) -> list[Quote]:
+    """Read and validate every quote in ``path``, enabled or not."""
+    path = Path(path)
+    source = str(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise QuoteStoreError(f"Quote file not found: {source}") from exc
+    except OSError as exc:
+        raise QuoteStoreError(f"Could not read quote file {source}: {exc.strerror}") from exc
+    return decode_quotes(text, source)
+
+
+# -- persistence ------------------------------------------------------------
+
+
+def quote_to_dict(quote: Quote) -> dict[str, Any]:
+    """Serialise one quote in the canonical, fully explicit field order."""
+    return {
+        "id": quote.id,
+        "text": quote.text,
+        "author": quote.author,
+        "enabled": quote.enabled,
+    }
+
+
+def quotes_to_json(quotes: Sequence[Quote]) -> str:
+    """Render a collection as pretty UTF-8 JSON with a trailing newline.
+
+    ``ensure_ascii=False`` keeps accented and non-Latin quotes readable in the
+    file instead of turning them into ``\\uXXXX`` escapes.
+    """
+    payload = [quote_to_dict(quote) for quote in quotes]
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
+def _destination_mode(path: Path) -> int:
+    """Permissions for the replacement file: the current ones, or user-private.
+
+    An existing file keeps whatever the user chose for it; only files this
+    application creates are forced to 0600.
+    """
+    try:
+        return os.stat(path).st_mode & 0o777
+    except OSError:
+        return PRIVATE_FILE_MODE
+
+
+def write_text_atomic(path: Path | str, text: str) -> None:
+    """Replace ``path`` with ``text`` in one step, or leave it untouched.
+
+    The temporary file is created in the destination's own directory so that
+    :func:`os.replace` stays a same-filesystem rename, which is atomic: a reader
+    (or a crash) sees either the whole old file or the whole new one, never a
+    half-written collection. The temporary file is removed if anything fails.
+    """
+    path = Path(path)
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
+
+    mode = _destination_mode(path)
+    handle, temporary = tempfile.mkstemp(
+        dir=directory, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        # Interrupted or failed: drop the partial file, keep the original.
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def write_quotes(path: Path | str, quotes: Sequence[Quote]) -> None:
+    """Persist ``quotes`` to ``path`` atomically, refusing to write bad data.
+
+    The rendered JSON is parsed back before the destination is touched, so a
+    collection that would not survive a reload — a duplicate id introduced by a
+    caller, say — raises instead of overwriting a working file.
+    """
+    path = Path(path)
+    text = quotes_to_json(quotes)
+    decode_quotes(text, str(path))
+    write_text_atomic(path, text)
+
+
 # -- store ------------------------------------------------------------------
 
 
@@ -158,26 +286,12 @@ class QuoteStore:
 
     @classmethod
     def from_json(cls, text: str, source: str | None = None) -> "QuoteStore":
-        try:
-            raw = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise QuoteStoreError(
-                f"The quote file{_where(source)} is not valid JSON: {exc.msg} "
-                f"(line {exc.lineno}, column {exc.colno})."
-            ) from exc
-        return cls(parse_quotes(raw, source), source)
+        return cls(decode_quotes(text, source), source)
 
     @classmethod
     def from_file(cls, path: Path | str) -> "QuoteStore":
         path = Path(path)
-        source = str(path)
-        try:
-            text = path.read_text(encoding="utf-8")
-        except FileNotFoundError as exc:
-            raise QuoteStoreError(f"Quote file not found: {source}") from exc
-        except OSError as exc:
-            raise QuoteStoreError(f"Could not read quote file {source}: {exc.strerror}") from exc
-        return cls.from_json(text, source)
+        return cls(load_quotes(path), str(path))
 
     @classmethod
     def emergency(cls) -> "QuoteStore":

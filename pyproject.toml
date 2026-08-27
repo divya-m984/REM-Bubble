@@ -14,8 +14,11 @@ requires-python = ">=3.11"
 # pip would try to build PyGObject from source instead of using the distro one.
 dependencies = []
 
+# The entry point is the CLI dispatcher, not the GTK application: it must be
+# importable with no display server. Running it with no command launches the
+# GUI, which is where GTK is imported.
 [project.scripts]
-rem-bubbles = "rem_bubbles.app:main"
+rem-bubbles = "rem_bubbles.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
