@@ -82,13 +82,70 @@ class ImportIsolationTests(unittest.TestCase):
     def test_config_and_stores_import_no_gtk(self):
         script = (
             "import sys; import rem_bubbles.config, rem_bubbles.quote_store, "
-            "rem_bubbles.reminder_store, rem_bubbles.persistence; "
+            "rem_bubbles.reminder_store, rem_bubbles.persistence, "
+            "rem_bubbles.notifications; "
             "print('gi' in sys.modules)"
         )
         result = subprocess.run(
             [sys.executable, "-c", script], capture_output=True, text=True, cwd=REPO_ROOT
         )
         self.assertEqual(result.stdout.strip(), "False")
+
+    def test_the_notification_engine_imports_no_gtk(self):
+        # Notification *policy* is GTK-free on purpose: it is what makes every
+        # deduplication rule testable without a desktop notification daemon.
+        script = (
+            "import sys; import rem_bubbles.notifications; "
+            "print(sorted(m for m in sys.modules "
+            "if m.split('.')[0] in {'gi', 'gtk'}))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, cwd=REPO_ROOT
+        )
+        self.assertEqual(result.stdout.strip(), "[]")
+
+    def test_the_cli_does_not_import_the_application_module(self):
+        # rem_bubbles.app is where libgtk4-layer-shell is loaded. Importing it
+        # for a headless command would defeat the whole arrangement.
+        script = "import sys; import rem_bubbles.cli; print('rem_bubbles.app' in sys.modules)"
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env={**os.environ, "WAYLAND_DISPLAY": "", "DISPLAY": ""},
+        )
+        self.assertEqual(result.stdout.strip(), "False")
+
+    def test_headless_commands_import_no_gtk(self):
+        for argv in (["--help"], ["doctor"], ["integration", "hyprland"]):
+            with self.subTest(argv=argv):
+                script = (
+                    "import sys, io, contextlib\n"
+                    "from rem_bubbles import cli\n"
+                    "try:\n"
+                    "    with contextlib.redirect_stdout(io.StringIO()), "
+                    "contextlib.redirect_stderr(io.StringIO()):\n"
+                    f"        cli.main({argv!r})\n"
+                    "except SystemExit:\n"
+                    "    pass\n"
+                    "print(sorted(m for m in sys.modules "
+                    "if m.split('.')[0] in {'gi', 'gtk'} "
+                    "or m == 'rem_bubbles.app' "
+                    "or 'layershell' in m.lower() or 'layer_shell' in m.lower()))\n"
+                )
+                environment = {k: v for k, v in os.environ.items()}
+                environment.pop("WAYLAND_DISPLAY", None)
+                environment.pop("DISPLAY", None)
+                result = subprocess.run(
+                    [sys.executable, "-c", script],
+                    capture_output=True,
+                    text=True,
+                    cwd=REPO_ROOT,
+                    env=environment,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "[]")
 
     def test_the_reminder_engine_imports_no_layer_shell(self):
         # The GTK-free guarantee is about more than 'gi': loading
@@ -242,6 +299,27 @@ class ParserTests(unittest.TestCase):
         _, output, _ = run_expecting_exit(["--help"])
         self.assertIn("reminder", output)
 
+    def test_top_level_help_lists_the_milestone_5_commands(self):
+        _, output, _ = run_expecting_exit(["--help"])
+        self.assertIn("doctor", output)
+        self.assertIn("integration", output)
+
+    def test_doctor_takes_no_arguments(self):
+        self.assertEqual(self.parse(["doctor"]).command, "doctor")
+        status, _, _ = run_expecting_exit(["doctor", "extra"])
+        self.assertEqual(status, 2)
+
+    def test_no_daemon_or_service_command_exists(self):
+        # Milestone 5 is desktop integration, not a background service: the
+        # running GUI is the only scheduler there is.
+        for name in ("daemon", "service", "watch", "start", "stop"):
+            status, _, _ = run_expecting_exit([name])
+            self.assertEqual(status, 2)
+
+    def test_no_systemd_integration_target_exists(self):
+        status, _, _ = run_expecting_exit(["integration", "systemd"])
+        self.assertEqual(status, 2)
+
     def test_no_edit_command_exists_yet(self):
         # Rescheduling is remove-then-add for this milestone, on purpose.
         for name in ("edit", "reschedule", "reset"):
@@ -281,6 +359,20 @@ class GuiDispatchTests(unittest.TestCase):
                     cli.main(["reminder", "list"])
         launch.assert_not_called()
 
+    def test_doctor_never_launches_the_gui(self):
+        with mock.patch.object(cli, "run_gui", return_value=0) as launch:
+            with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    cli.main(["doctor"])
+        launch.assert_not_called()
+
+    def test_integration_never_launches_the_gui(self):
+        with mock.patch.object(cli, "run_gui", return_value=0) as launch:
+            with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    cli.main(["integration", "hyprland"])
+        launch.assert_not_called()
+
     def test_run_gui_passes_only_the_program_name(self):
         fake = mock.Mock(return_value=0)
         module = mock.Mock(main=fake)
@@ -307,13 +399,17 @@ class InitTests(IsolatedConfigTestCase):
         self.assertIn(str(self.config_path), output)
 
     def test_written_config_is_the_documented_default(self):
-        # A fresh config names both collections. Milestone 3 wrote only
-        # [quotes]; a config from then is still valid and is never rewritten
-        # (see test_a_quote_only_config_is_left_alone).
+        # A fresh config names all three tables, so the file documents itself —
+        # including where the notification switch lives and that it is off.
+        # Milestone 3 wrote only [quotes] and Milestone 4 added [reminders];
+        # configs from either are still valid and are never rewritten (see
+        # test_a_quote_only_config_is_left_alone and its Milestone 4 sibling).
         run(["init"])
         self.assertEqual(
             self.config_path.read_text(encoding="utf-8"),
-            '[quotes]\nfile = "quotes.json"\n\n[reminders]\nfile = "reminders.json"\n',
+            '[quotes]\nfile = "quotes.json"\n'
+            '\n[reminders]\nfile = "reminders.json"\n'
+            "\n[notifications]\nenabled = false\n",
         )
 
     def test_the_written_config_is_readable(self):
@@ -321,6 +417,12 @@ class InitTests(IsolatedConfigTestCase):
         config = read_user_config(self.config_path)
         self.assertEqual(config.quote_file, self.quotes_path)
         self.assertEqual(config.reminder_file, self.reminders_path)
+        self.assertFalse(config.notifications)
+
+    def test_a_fresh_config_does_not_switch_notifications_on(self):
+        # Writing the table is documentation, not a change of behaviour.
+        run(["init"])
+        self.assertFalse(read_user_config(self.config_path).notifications)
 
     def test_a_quote_only_config_is_left_alone(self):
         # Backwards compatibility: a Milestone 3 user must not have their file
@@ -333,6 +435,27 @@ class InitTests(IsolatedConfigTestCase):
             '[quotes]\nfile = "quotes.json"\n',
         )
         self.assertIn("left unchanged", output)
+
+    def test_a_quote_and_reminder_config_is_left_alone(self):
+        # The same promise one milestone later: a Milestone 4 config must not
+        # gain a [notifications] table behind the user's back.
+        milestone_4 = (
+            '[quotes]\nfile = "quotes.json"\n\n[reminders]\nfile = "reminders.json"\n'
+        )
+        self.write_config(milestone_4)
+        status, output, _ = run(["init"])
+        self.assertEqual(status, 0)
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), milestone_4)
+        self.assertIn("left unchanged", output)
+
+    def test_an_untouched_legacy_config_still_means_notifications_off(self):
+        for text in (
+            '[quotes]\nfile = "quotes.json"\n',
+            '[quotes]\nfile = "quotes.json"\n\n[reminders]\nfile = "reminders.json"\n',
+        ):
+            self.write_config(text)
+            run(["init"])
+            self.assertFalse(read_user_config(self.config_path).notifications)
 
     def test_does_not_create_a_reminder_file(self):
         run(["init"])

@@ -11,14 +11,16 @@ floats above everything without reserving any space in the tiling layout.
 
 ## Status
 
-Milestone 4 — graphical foundation, the quote engine, personal reminders with
-none/daily/weekly recurrence, and a terminal interface for managing both in
-`~/.config/rem-bubbles/`.
+Milestone 5 — graphical foundation, the quote engine, personal reminders with
+none/daily/weekly recurrence, a terminal interface for managing both in
+`~/.config/rem-bubbles/`, and the desktop integration that makes it usable as a
+permanent part of a session: one instance, clean shutdown, optional desktop
+notifications, an autostart helper and a diagnostic command.
 
-Not implemented yet: desktop notifications, a background daemon, autostart,
-sound, any editing in the GUI (no add button, edit dialog, delete button,
-calendar picker, settings window or file chooser), a `reminder edit` command,
-natural-language dates, timezone support, and live reload of a running bubble.
+Not implemented yet: a background daemon, a systemd service, sound, any editing
+in the GUI (no add button, edit dialog, delete button, calendar picker, settings
+window or file chooser), a `reminder edit` command, natural-language dates,
+timezone support, and live reload of a running bubble.
 
 ## Requirements
 
@@ -48,6 +50,8 @@ command that never opens a window:
 ```bash
 rem-bubbles gui                              # the same thing, explicitly
 rem-bubbles init                             # set up ~/.config/rem-bubbles/
+rem-bubbles doctor                           # check the setup, change nothing
+rem-bubbles integration hyprland             # print an autostart line
 
 rem-bubbles quote list                       # show your quotes
 rem-bubbles quote add "Keep making weird things."
@@ -109,7 +113,7 @@ Files that already exist keep whatever permissions you gave them.
 
 ### config.toml
 
-Two optional tables, one key each:
+Three optional tables, one key each:
 
 ```toml
 [quotes]
@@ -117,6 +121,9 @@ file = "quotes.json"
 
 [reminders]
 file = "reminders.json"
+
+[notifications]
+enabled = false
 ```
 
 Each `file` may be relative (resolved against the directory holding
@@ -128,13 +135,15 @@ Each `file` may be relative (resolved against the directory holding
 file = "/some/private/location/my-quotes.json"
 ```
 
-Both tables are optional and both default to the file beside the config, so **a
-`config.toml` written before reminders existed is still complete** — if it
-contains only `[quotes]`, reminders live at
-`~/.config/rem-bubbles/reminders.json` anyway, and `rem-bubbles init` will not
-rewrite your file to add the section.
+Every table is optional. The two `file` keys default to the file beside the
+config and `enabled` defaults to `false`, so **a `config.toml` written before
+reminders or notifications existed is still complete** — if it contains only
+`[quotes]`, reminders live at `~/.config/rem-bubbles/reminders.json` anyway,
+notifications stay off, and `rem-bubbles init` will not rewrite your file to add
+either section.
 
-That is the whole format for now — no theme, position or snooze settings.
+That is the whole format for now — no theme, position or snooze settings, and
+no notification sound, urgency, timeout or per-reminder settings.
 
 A `config.toml` that cannot be understood is never guessed past. The GUI prints
 the problem to stderr and carries on with the default locations rather than
@@ -416,10 +425,9 @@ whatever quote you had navigated to.
 **There is no daemon.** While REM Bubbles is not running, nothing wakes up and
 nothing notifies you. Reminders that fell due in the meantime are evaluated the
 next time you start it, and appear then — collapsed to their most recent
-occurrence.
-
-There are no desktop notifications, no sound, and no autostart in this
-milestone. Reminder presentation stays inside the REM Bubbles window.
+occurrence. There is no watchdog and no restart loop either: if it crashes, it
+stays stopped, because a crash hidden by a supervisor is a bug nobody ever
+fixes.
 
 ### Reminder file format
 
@@ -489,43 +497,252 @@ restart it to pick the change up. Snooze and Dismiss performed *by* the running
 window do update its own collection and are persisted immediately. There is no
 filesystem watching yet.
 
-## Tests
+## Desktop notifications
 
-Nothing in the quote engine, the reminder engine, the configuration layer or the
-CLI needs GTK, Wayland or a display server, so the whole suite runs anywhere:
+Optional, and **off unless you turn them on**:
+
+```toml
+[notifications]
+enabled = true
+```
+
+The default is `false` deliberately. Updating REM Bubbles must never start
+putting notifications on the screen of somebody who never asked for them, so a
+`config.toml` with no `[notifications]` table means exactly the same thing as
+`enabled = false`.
+
+With it on, a reminder falling due also raises a desktop notification:
+
+```text
+REM Bubbles
+Submit the report.
+Due Aug 30 · 6:00 PM
+```
+
+**The reminder card remains authoritative.** A notification is an extra signal
+pointing at it, never a replacement: the bubble still glows, the reminder still
+takes priority in the card, and **Snooze 10m** and **Dismiss** still live there
+and are still what changes anything on disk.
+
+### One notification per due episode
+
+The scheduler runs every 30 seconds. It does not notify every 30 seconds. A
+reminder is notified once per *episode*, identified by three things together —
+the reminder, its current occurrence, and its current snooze. So:
+
+- **Ticks.** A reminder that has been due for an hour has produced one
+  notification, not 120.
+- **Recurrence.** A daily 08:00 reminder notifies at Monday 08:00, says nothing
+  at Monday 08:30, and notifies again at Tuesday 08:00. Dismissing Monday does
+  not suppress Tuesday.
+- **Snooze.** Snoozing takes the reminder out of the queue and does not notify
+  again immediately. When the snooze expires and the same occurrence becomes due
+  again, you get **one** more notification — and then no more until something
+  else changes.
+- **Dismissal.** A dismissed occurrence never notifies again. A recurring
+  reminder still notifies for its *next* occurrence.
+- **Expanding and collapsing** the bubble changes nothing about notifications.
+
+Snoozing or dismissing also withdraws the notification from your desktop, so it
+stops showing something you have already dealt with.
+
+### Two limitations worth knowing
+
+**Restarting may re-notify.** Deduplication is kept in memory only — nothing
+about notifications is written to `reminders.json`, and there is no
+`last_notified_at` field. If you deliberately restart REM Bubbles while a
+reminder is still overdue, you may get one more notification for an episode that
+was already announced. The persisted reminder state — snoozed, dismissed,
+enabled — is unaffected, and that is the state that matters.
+
+**A missing backend is not an error.** If no desktop notification service is
+running, the send fails, the failure is reported to stderr **once** rather than
+every 30 seconds, and everything else carries on unchanged: reminders stay
+scheduled, nothing is marked dismissed, and the card behaves exactly as it
+always does.
+
+### Clicking a notification
+
+Clicking the notification activates the **already-running** REM Bubbles — it
+never starts a second process — expands the card and shows that reminder, even
+if it was not the one the ordering would have picked. If the reminder has since
+been snoozed, dismissed or removed, the window simply opens onto whatever is
+relevant now rather than resurrecting something you finished with.
+
+## Running it permanently
+
+### One instance
+
+Only one REM Bubbles runs per session. This is Gio's own D-Bus uniqueness, via
+the application id — there is no pidfile, no lockfile and no process-name
+matching. Run it a second time and the second invocation hands over to the first
+and exits `0`:
+
+```bash
+rem-bubbles      # terminal 1: the bubble appears
+rem-bubbles      # terminal 2: exits immediately, the first one expands
+```
+
+The first process keeps running and keeps everything: the quote you had
+navigated to, the loaded reminders, snooze and dismiss state, and its single
+30-second timer. No second layer surface is created and no second scheduler
+starts.
+
+### Stopping it
+
+`Ctrl+C` and `SIGTERM` both stop it cleanly, with no traceback:
+
+```bash
+rem-bubbles
+^C
+```
+
+Signals are turned into ordinary main-loop events, so they never interrupt
+Python mid-statement. Both routes — and closing the window, and an ordinary quit
+— go through the same single cleanup path, which removes the 30-second timer and
+drops the in-memory notification state. Nothing is written during shutdown, so
+stopping REM Bubbles can never be the thing that changed a reminder.
+
+### Starting it with your session
+
+```bash
+rem-bubbles integration hyprland
+```
+
+```text
+REM Bubbles Hyprland autostart:
+
+    exec-once = /absolute/path/to/rem-bubbles
+
+Add that line to your Hyprland configuration, then start a new Hyprland session.
+Nothing was written — your Hyprland configuration is unchanged.
+```
+
+**It prints the line. It does not add it.** Your Hyprland configuration is not
+edited, `hyprctl reload` is not called, and there is no `--install` mode. Copy
+the line into your `hyprland.conf` yourself — a compositor that will not start
+because a tool edited its config behind your back is a much worse outcome than
+one line of copy and paste.
+
+The path is absolute on purpose: a Hyprland session does not activate a virtual
+environment, so `exec-once = rem-bubbles` would not find a venv install. The
+printed path names whichever installation is actually running. If it cannot be
+determined, the command says so and exits `1` rather than printing a line it
+knows would not work.
+
+See `examples/hyprland.conf` for a documented example.
+
+There is **no systemd unit, no timer and no cron job**, by design. Hyprland's
+`exec-once` is the intended integration, and the scheduler inside the running
+GUI is the only scheduler there is.
+
+## Diagnostics
+
+```bash
+rem-bubbles doctor
+```
+
+```text
+REM Bubbles doctor
+
+  Version:       rem-bubbles 0.1.0
+  Python:        3.14.7
+  Executable:    /path/to/.venv/bin/rem-bubbles
+  Config dir:    /home/you/.config/rem-bubbles
+
+  Config:        /home/you/.config/rem-bubbles/config.toml (parses)
+  Quotes:        /home/you/.config/rem-bubbles/quotes.json (12 total, 11 enabled)
+  Reminders:     /home/you/.config/rem-bubbles/reminders.json (3 total, 3 enabled, 1 due)
+  Notifications: disabled
+
+  WAYLAND_DISPLAY: wayland-1
+  HYPRLAND_INSTANCE_SIGNATURE: set
+
+No problems found.
+```
+
+It exits `0` when nothing is likely to stop REM Bubbles behaving as intended,
+and `1` for a malformed `config.toml`, malformed quote data, malformed reminder
+data or a quote collection with nothing enabled. A **missing `reminders.json` is
+not a problem** — having no reminders is a normal way to use it — and neither is
+a missing personal `quotes.json`, because the fallback chain still has something
+to show.
+
+`doctor` reports **counts, never contents**: your quotes and reminders are
+personal, and a diagnostic is the kind of output that gets pasted into a bug
+report. It does not print the Hyprland instance signature either, only whether
+one is set.
+
+It imports no GTK, opens no window and writes nothing, so it works anywhere —
+including over SSH with no compositor at all, which is where a diagnostic is
+most useful:
+
+```bash
+env -u WAYLAND_DISPLAY -u DISPLAY rem-bubbles doctor
+```
+
+Starting the bubble normally stays quiet. Only real startup problems go to
+stderr; detailed diagnostics live in `doctor`, not on every launch.
+
+## Tests
 
 ```bash
 .venv/bin/python -m unittest discover -s tests
 ```
 
-The tests use temporary directories and a temporary `XDG_CONFIG_HOME`
-throughout; they never read or write your real `~/.config/rem-bubbles`. No test
-changes the system clock either: every time-dependent method takes an optional
-`now`, so recurrence, snooze expiry and overdue states are all exercised with
-explicit datetimes.
+Nothing in the quote engine, the reminder engine, the notification engine, the
+configuration layer or the CLI needs GTK, Wayland or a display server, so almost
+the whole suite runs anywhere. In particular every notification rule — one per
+episode, once per recurrence, one more after a snooze expires, never after a
+dismissal — is asserted **without a desktop notification daemon**, because the
+policy lives in a GTK-free module that reaches the outside world through a plain
+callable.
+
+A small number of tests genuinely need a compositor: a layer surface cannot be
+created without one, so the single-instance, signal-shutdown and
+notification-click tests start real processes under a live Wayland session.
+Those are skipped, with a reason, when there is no session — rather than faked
+into passing, since a single-instance check that only compared process names
+would prove nothing.
+
+The tests use temporary directories, a temporary `HOME` and a temporary
+`XDG_CONFIG_HOME` throughout; they never read or write your real
+`~/.config/rem-bubbles`, and nothing touches `~/.config/hypr`. No test changes
+the system clock either: every time-dependent method takes an optional `now`, so
+recurrence, snooze expiry, overdue states and notification episodes are all
+exercised with explicit datetimes.
 
 ## Layout
 
 ```text
-src/rem_bubbles/cli.py             command parsing, quote and reminder management, GUI dispatch
-src/rem_bubbles/app.py             application lifecycle, CSS loading, GTK entry point
+src/rem_bubbles/cli.py             command parsing, quote/reminder management, doctor, integration
+src/rem_bubbles/app.py             application lifecycle, signals, single instance, notification delivery
 src/rem_bubbles/bubble.py          layer-shell window, bubble/quote/reminder UI, the 30s check
 src/rem_bubbles/quote_store.py     quote parsing, validation, daily selection, navigation, persistence
 src/rem_bubbles/reminder_store.py  reminder parsing, validation, recurrence, due state, snooze, dismissal
-src/rem_bubbles/config.py          XDG paths, config.toml, quote and reminder source resolution
+src/rem_bubbles/notifications.py   notification policy: deduplication, wording, which card to show
+src/rem_bubbles/config.py          XDG paths, config.toml, quote/reminder/notification resolution
 src/rem_bubbles/persistence.py     the atomic file replace both collections share
 assets/style.css                   all styling
 examples/config.toml               sample configuration
+examples/hyprland.conf             sample autostart snippet (documentation only)
 examples/quotes.json               sample quote collection
 examples/reminders.json            sample reminder collection (schema documentation only)
-tests/                             quote engine, reminder engine, config, CLI (no display server needed)
+tests/                             quote, reminder and notification engines, config, CLI, lifecycle
 ```
 
-`cli.py`, `config.py`, `quote_store.py`, `reminder_store.py` and
-`persistence.py` import no GTK. Presentation stays in `bubble.py`; quote data
-stays in `quote_store.py` and reminder data in `reminder_store.py`, both
-directions, so each on-disk format has exactly one home. The window never does
-calendar arithmetic — it asks "what is due now?" and renders the answer.
+`cli.py`, `config.py`, `quote_store.py`, `reminder_store.py`,
+`notifications.py` and `persistence.py` import no GTK. Presentation stays in
+`bubble.py`; quote data stays in `quote_store.py` and reminder data in
+`reminder_store.py`, both directions, so each on-disk format has exactly one
+home. The window never does calendar arithmetic — it asks "what is due now?"
+and renders the answer.
+
+Notifications follow the same split. `notifications.py` decides *whether*
+anything deserves announcing and *what it says*; `app.py` does the announcing,
+with `Gio.Notification` and `Gtk.Application.send_notification`. No subprocess
+is spawned, `notify-send` is never invoked, and no dependency was added for any
+of it.
 
 Writes go through `persistence.write_text_atomic()`: serialise, re-parse to
 prove the result would survive a reload, write to a temporary file in the same
@@ -542,6 +759,8 @@ So this works on a machine with no Wayland session at all:
 
 ```bash
 env -u WAYLAND_DISPLAY -u DISPLAY rem-bubbles quote list
+env -u WAYLAND_DISPLAY -u DISPLAY rem-bubbles doctor
+env -u WAYLAND_DISPLAY -u DISPLAY rem-bubbles integration hyprland
 ```
 
 ### A note on load order

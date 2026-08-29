@@ -21,3 +21,16 @@ file = "quotes.json"
 # ~/.config/rem-bubbles/reminders.json. A config written before reminders
 # existed needs no changes.
 file = "reminders.json"
+
+[notifications]
+# Whether a reminder falling due also raises a desktop notification, alongside
+# the REM Bubbles card. The card is the reminder; this is only an extra signal.
+#
+# Optional, and false unless you say otherwise. Updating REM Bubbles must never
+# start putting notifications on your screen, so a config written before this
+# table existed means the same thing as the line below.
+#
+# One notification per due episode: a recurring reminder notifies once per
+# occurrence, a snooze notifies once more when it expires, and the thirty-second
+# scheduler never repeats itself.
+enabled = false

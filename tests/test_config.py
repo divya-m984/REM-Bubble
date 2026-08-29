@@ -15,9 +15,11 @@ from rem_bubbles.config import (
     ConfigError,
     default_quote_file,
     default_reminder_file,
+    load_notification_preference,
     load_reminder_store,
     managed_quote_file,
     managed_reminder_file,
+    notifications_enabled,
     read_user_config,
     reminder_file,
     user_config_dir,
@@ -474,6 +476,215 @@ class ManagedReminderFileTests(IsolatedConfigTestCase):
         self.write_config("[reminders]\nfile = 7\n")
         with self.assertRaises(ConfigError):
             managed_reminder_file()
+
+
+# -- notifications ----------------------------------------------------------
+
+
+class NotificationConfigTests(IsolatedConfigTestCase):
+    """``[notifications].enabled`` — optional, boolean, and false by default."""
+
+    def test_missing_config_means_disabled(self):
+        self.assertFalse(read_user_config().notifications)
+        self.assertFalse(notifications_enabled())
+
+    def test_empty_config_means_disabled(self):
+        self.write_config("")
+        self.assertFalse(notifications_enabled())
+
+    def test_a_missing_notifications_table_means_disabled(self):
+        self.write_config('[quotes]\nfile = "quotes.json"\n')
+        self.assertFalse(notifications_enabled())
+
+    def test_a_notifications_table_without_the_key_means_disabled(self):
+        self.write_config("[notifications]\n")
+        self.assertFalse(notifications_enabled())
+
+    def test_enabled_true(self):
+        self.write_config("[notifications]\nenabled = true\n")
+        self.assertTrue(notifications_enabled())
+
+    def test_enabled_false(self):
+        self.write_config("[notifications]\nenabled = false\n")
+        self.assertFalse(notifications_enabled())
+
+    def test_the_default_is_off(self):
+        # Deliberate. Updating REM Bubbles must not start putting notifications
+        # on the screen of somebody who never asked for them.
+        self.write_config('[quotes]\nfile = "quotes.json"\n')
+        self.assertFalse(read_user_config().notifications)
+
+    def test_all_three_tables_together(self):
+        self.write_config(
+            '[quotes]\nfile = "q.json"\n\n'
+            '[reminders]\nfile = "r.json"\n\n'
+            "[notifications]\nenabled = true\n"
+        )
+        config = read_user_config()
+        self.assertEqual(config.quote_file, self.config_dir / "q.json")
+        self.assertEqual(config.reminder_file, self.config_dir / "r.json")
+        self.assertTrue(config.notifications)
+
+    def test_the_init_default_text_parses_as_disabled(self):
+        from rem_bubbles.config import DEFAULT_CONFIG_TEXT
+
+        self.write_config(DEFAULT_CONFIG_TEXT)
+        self.assertFalse(notifications_enabled())
+
+    def test_reading_does_not_create_anything(self):
+        self.write_config("[notifications]\nenabled = true\n")
+        notifications_enabled()
+        self.assertFalse((self.config_dir / "quotes.json").exists())
+        self.assertFalse((self.config_dir / "reminders.json").exists())
+
+
+class NotificationConfigErrorTests(IsolatedConfigTestCase):
+    def assertRejects(self, text, needle):
+        self.write_config(text)
+        with self.assertRaises(ConfigError) as caught:
+            read_user_config()
+        self.assertIn(needle, str(caught.exception))
+
+    def test_notifications_is_not_a_table(self):
+        self.assertRejects(
+            "notifications = true\n", "[notifications] must be a table"
+        )
+
+    def test_notifications_is_a_string(self):
+        self.assertRejects(
+            'notifications = "on"\n', "[notifications] must be a table"
+        )
+
+    def test_notifications_is_an_array(self):
+        self.assertRejects(
+            "notifications = [1, 2]\n", "[notifications] must be a table"
+        )
+
+    def test_enabled_is_a_string(self):
+        self.assertRejects(
+            '[notifications]\nenabled = "true"\n', '"enabled" must be true or false'
+        )
+
+    def test_enabled_is_an_integer(self):
+        # TOML distinguishes 1 from true, so this is a real mistake, not a
+        # spelling of "on". Guessing either way would be guessing about
+        # somebody's screen.
+        self.assertRejects(
+            "[notifications]\nenabled = 1\n", '"enabled" must be true or false'
+        )
+
+    def test_enabled_is_an_array(self):
+        self.assertRejects(
+            "[notifications]\nenabled = [true]\n", '"enabled" must be true or false'
+        )
+
+    def test_the_message_names_the_config_file(self):
+        self.write_config("[notifications]\nenabled = 1\n")
+        with self.assertRaises(ConfigError) as caught:
+            read_user_config()
+        self.assertIn(str(self.config_dir / "config.toml"), str(caught.exception))
+
+    def test_a_broken_quotes_table_is_still_reported_first(self):
+        self.write_config("[quotes]\nfile = 7\n\n[notifications]\nenabled = 1\n")
+        with self.assertRaises(ConfigError) as caught:
+            read_user_config()
+        self.assertIn("[quotes]", str(caught.exception))
+
+    def test_notifications_errors_do_not_break_quote_parsing(self):
+        # The quote and reminder tables are read before the switch, so a broken
+        # switch must not be able to hide a good path.
+        self.write_config(
+            '[quotes]\nfile = "q.json"\n\n[notifications]\nenabled = 1\n'
+        )
+        with self.assertRaises(ConfigError):
+            read_user_config()
+        # ...and with the switch fixed, the path is exactly what it always was.
+        self.write_config(
+            '[quotes]\nfile = "q.json"\n\n[notifications]\nenabled = true\n'
+        )
+        self.assertEqual(read_user_config().quote_file, self.config_dir / "q.json")
+
+
+class NotificationPreferenceTests(IsolatedConfigTestCase):
+    """The application's non-raising reader, used at launch."""
+
+    def read(self):
+        import contextlib
+        import io
+
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            enabled = load_notification_preference()
+        return enabled, errors.getvalue()
+
+    def test_a_healthy_config_is_read(self):
+        self.write_config("[notifications]\nenabled = true\n")
+        enabled, errors = self.read()
+        self.assertTrue(enabled)
+        self.assertEqual(errors, "")
+
+    def test_a_missing_config_is_silent(self):
+        enabled, errors = self.read()
+        self.assertFalse(enabled)
+        self.assertEqual(errors, "")
+
+    def test_a_malformed_config_degrades_to_off(self):
+        # Off, not on: a typo in a config file must not be able to switch
+        # notifications on for somebody.
+        self.write_config("[notifications]\nenabled = 1\n")
+        enabled, errors = self.read()
+        self.assertFalse(enabled)
+        self.assertIn("must be true or false", errors)
+
+    def test_a_malformed_config_reports_without_a_traceback(self):
+        self.write_config("[quotes\nbroken")
+        _, errors = self.read()
+        self.assertIn("rem-bubbles:", errors)
+        self.assertNotIn("Traceback", errors)
+
+
+# -- backwards compatibility ------------------------------------------------
+
+
+class LegacyConfigTests(IsolatedConfigTestCase):
+    """Configs written by earlier milestones stay valid, unchanged, forever."""
+
+    MILESTONE_3 = '[quotes]\nfile = "quotes.json"\n'
+    MILESTONE_4 = (
+        '[quotes]\nfile = "quotes.json"\n\n[reminders]\nfile = "reminders.json"\n'
+    )
+
+    def test_a_quote_only_config_is_still_valid(self):
+        self.write_config(self.MILESTONE_3)
+        config = read_user_config()
+        self.assertEqual(config.quote_file, self.config_dir / "quotes.json")
+        self.assertIsNone(config.reminder_file)
+        self.assertFalse(config.notifications)
+
+    def test_a_quote_only_config_still_resolves_reminders(self):
+        self.write_config(self.MILESTONE_3)
+        self.assertEqual(managed_reminder_file(), self.config_dir / "reminders.json")
+
+    def test_a_quote_and_reminder_config_is_still_valid(self):
+        self.write_config(self.MILESTONE_4)
+        config = read_user_config()
+        self.assertEqual(config.quote_file, self.config_dir / "quotes.json")
+        self.assertEqual(config.reminder_file, self.config_dir / "reminders.json")
+        self.assertFalse(config.notifications)
+
+    def test_neither_legacy_config_switches_notifications_on(self):
+        for text in (self.MILESTONE_3, self.MILESTONE_4):
+            self.write_config(text)
+            self.assertFalse(notifications_enabled())
+
+    def test_reading_a_legacy_config_does_not_rewrite_it(self):
+        self.write_config(self.MILESTONE_3)
+        read_user_config()
+        notifications_enabled()
+        self.assertEqual(
+            (self.config_dir / "config.toml").read_text(encoding="utf-8"),
+            self.MILESTONE_3,
+        )
 
 
 class ManagedQuoteFileTests(IsolatedConfigTestCase):

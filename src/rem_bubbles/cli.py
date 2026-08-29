@@ -18,7 +18,10 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
+import shutil
 import sys
+import sysconfig
 import unicodedata
 from datetime import datetime
 from hashlib import sha256
@@ -31,6 +34,7 @@ from rem_bubbles.config import (
     UserConfig,
     managed_quote_file,
     managed_reminder_file,
+    quote_file_candidates,
     read_user_config,
     user_config_dir,
     user_config_file,
@@ -54,7 +58,14 @@ from rem_bubbles.reminder_store import (
     write_reminders,
 )
 
-__all__ = ["build_parser", "generate_id", "main", "slugify"]
+__all__ = [
+    "build_parser",
+    "console_script_path",
+    "generate_id",
+    "hyprland_autostart_line",
+    "main",
+    "slugify",
+]
 
 PROGRAM = "rem-bubbles"
 
@@ -221,9 +232,11 @@ def cmd_init(_args: argparse.Namespace) -> int:
     """Create the configuration directory and ``config.toml`` if absent.
 
     Never overwrites anything, so running it twice is safe — including a config
-    written before reminders existed, which is left exactly as it is. ``[quotes]``
-    and ``[reminders]`` are both optional and both default to the file beside the
-    config, so an untouched Milestone 3 config is already complete.
+    written before reminders or notifications existed, which is left exactly as
+    it is. All three tables are optional: ``[quotes]`` and ``[reminders]``
+    default to the file beside the config and ``[notifications]`` defaults to
+    off, so an untouched Milestone 3 or Milestone 4 config is already complete
+    and adding the new table to it would change nothing.
 
     Neither data file is created here: leaving those to the first ``quote add``
     and ``reminder add`` means each collection only ever contains entries the
@@ -605,6 +618,247 @@ def cmd_reminder_disable(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- desktop integration ----------------------------------------------------
+
+
+def console_script_path() -> Path | None:
+    """The absolute path of the ``rem-bubbles`` executable, or None.
+
+    Autostart cannot assume the user's Hyprland session activates a virtual
+    environment, so ``exec-once = rem-bubbles`` is not good enough: the line has
+    to name the installation that is actually running. Three sources are tried,
+    most direct first.
+
+    1. ``sys.argv[0]``, when this process *was* started as the console script.
+       Nothing describes "the installation that is running" better than the file
+       that is running.
+    2. the script directory of the interpreter executing us, which is the right
+       answer for ``python -m rem_bubbles.cli`` and for any virtual environment.
+    3. whatever ``PATH`` resolves, as a last resort.
+
+    Paths are made absolute without resolving symlinks: a venv reached through a
+    symlinked directory should keep the name the user knows it by. None means
+    "could not be determined", and the caller says so rather than printing a
+    line that would not work.
+    """
+    candidates: list[Path] = []
+
+    argv0 = sys.argv[0] if sys.argv else ""
+    if argv0 and Path(argv0).name == PROGRAM:
+        candidates.append(Path(os.path.abspath(argv0)))
+
+    scripts = sysconfig.get_path("scripts")
+    if scripts:
+        candidates.append(Path(os.path.abspath(scripts)) / PROGRAM)
+
+    found = shutil.which(PROGRAM)
+    if found:
+        candidates.append(Path(os.path.abspath(found)))
+
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def hyprland_autostart_line(executable: Path | str) -> str:
+    """The ``exec-once`` line for this installation.
+
+    ``exec-once`` is handed to a shell, so a path containing spaces has to be
+    quoted or Hyprland would try to run the first word and pass the rest as
+    arguments. :func:`shlex.quote` leaves an ordinary path untouched.
+    """
+    return f"exec-once = {shlex.quote(str(executable))}"
+
+
+def cmd_integration_hyprland(_args: argparse.Namespace) -> int:
+    """Print the recommended Hyprland autostart line. Writes nothing.
+
+    Deliberately print-only. Editing somebody's compositor configuration is not
+    a thing a quote bubble should do behind their back, and a session that will
+    not start because a tool appended a line to ``hyprland.conf`` is a far worse
+    outcome than a line the user pastes themselves. There is no ``--install``,
+    nothing is reloaded, and ``hyprctl`` is never called.
+    """
+    executable = console_script_path()
+    if executable is None:
+        raise CommandError(
+            "Could not work out where the rem-bubbles executable lives, so "
+            "there is no autostart line worth printing.\n"
+            "Install it with 'pip install -e .' (or 'pip install rem-bubbles') "
+            "and run this again."
+        )
+
+    print("REM Bubbles Hyprland autostart:")
+    print()
+    print(f"    {hyprland_autostart_line(executable)}")
+    print()
+    print(
+        "Add that line to your Hyprland configuration, then start a new "
+        "Hyprland session."
+    )
+    print("Nothing was written — your Hyprland configuration is unchanged.")
+    return 0
+
+
+# -- doctor -----------------------------------------------------------------
+
+#: Environment variables ``doctor`` reports on, and how much of each it shows.
+#: The Hyprland signature is a session identifier rather than a setting, so its
+#: presence is reported but its value is not printed.
+_WAYLAND_VAR = "WAYLAND_DISPLAY"
+_HYPRLAND_VAR = "HYPRLAND_INSTANCE_SIGNATURE"
+
+
+def _doctor_line(label: str, value: str) -> str:
+    return f"  {label:<14} {value}"
+
+
+def _doctor_config(problems: list[str]) -> UserConfig | None:
+    """Report on ``config.toml``. None means it could not be understood."""
+    path = user_config_file()
+    if not path.exists():
+        print(_doctor_line("Config:", f"{path} (not created yet)"))
+        print(_doctor_line("", f"Create it with: {PROGRAM} init"))
+        return UserConfig(path=path, exists=False)
+
+    try:
+        config = read_user_config(path)
+    except ConfigError as exc:
+        print(_doctor_line("Config:", f"{path} (MALFORMED)"))
+        print(_doctor_line("", str(exc)))
+        problems.append("config.toml could not be parsed")
+        return None
+
+    print(_doctor_line("Config:", f"{path} (parses)"))
+    return config
+
+
+def _doctor_quotes(config: UserConfig | None, problems: list[str]) -> None:
+    """Report on the personal quote file, without printing any quote."""
+    if config is None:
+        print(_doctor_line("Quotes:", "unknown — the config could not be parsed"))
+        return
+
+    path = managed_quote_file(config)
+    if not path.exists():
+        # Not a fault. The runtime chain falls through to a checkout-local
+        # collection, then the tracked examples, then one built-in quote, so the
+        # bubble always has something to show.
+        fallbacks = [candidate for candidate in quote_file_candidates() if candidate != path]
+        source = str(fallbacks[0]) if fallbacks else "the built-in quote"
+        print(_doctor_line("Quotes:", f"{path} (not created yet)"))
+        print(_doctor_line("", f"Falling back to: {source}"))
+        return
+
+    try:
+        quotes = load_quotes(path)
+    except QuoteStoreError as exc:
+        print(_doctor_line("Quotes:", f"{path} (MALFORMED)"))
+        print(_doctor_line("", str(exc)))
+        problems.append("the quote file could not be parsed")
+        return
+
+    enabled = _enabled_count(quotes)
+    print(_doctor_line("Quotes:", f"{path} ({len(quotes)} total, {enabled} enabled)"))
+    if enabled == 0 and quotes:
+        print(_doctor_line("", "No quote is enabled — the bubble has nothing to show."))
+        problems.append("no quote is enabled")
+
+
+def _doctor_reminders(config: UserConfig | None, problems: list[str]) -> None:
+    """Report on the personal reminder file, without printing any reminder."""
+    if config is None:
+        print(_doctor_line("Reminders:", "unknown — the config could not be parsed"))
+        return
+
+    path = managed_reminder_file(config)
+    if not path.exists():
+        # Having no reminders is a normal way to use REM Bubbles.
+        print(_doctor_line("Reminders:", f"{path} (none yet)"))
+        return
+
+    try:
+        reminders = load_reminders(path)
+    except ReminderStoreError as exc:
+        print(_doctor_line("Reminders:", f"{path} (MALFORMED)"))
+        print(_doctor_line("", str(exc)))
+        problems.append("the reminder file could not be parsed")
+        return
+
+    store = ReminderStore(reminders, str(path), path)
+    enabled = sum(1 for reminder in reminders if reminder.enabled)
+    due = len(store.due_reminders(datetime.now()))
+    print(
+        _doctor_line(
+            "Reminders:",
+            f"{path} ({len(reminders)} total, {enabled} enabled, {due} due)",
+        )
+    )
+
+
+def _doctor_session() -> None:
+    """Report the Wayland session variables, without initialising GTK.
+
+    Reading two environment variables is the whole test. Actually opening a
+    display to find out would mean importing GTK, which would cost ``doctor``
+    the one property that makes it useful when things are broken: it runs
+    anywhere, including over SSH with no compositor at all.
+    """
+    # Not column-aligned with the block above: these names are long enough that
+    # padding to them would leave the whole report mostly whitespace.
+    display = os.environ.get(_WAYLAND_VAR, "")
+    print(f"  {_WAYLAND_VAR}: {display or 'not set (no Wayland session)'}")
+    # The signature is a session identifier, not a setting; whether it is there
+    # is the diagnostic, and printing it would put a session token in a log.
+    signature = os.environ.get(_HYPRLAND_VAR, "")
+    print(f"  {_HYPRLAND_VAR}: {'set' if signature else 'not set'}")
+
+
+def cmd_doctor(_args: argparse.Namespace) -> int:
+    """Explain whether this REM Bubbles environment makes sense.
+
+    Headless by construction: it imports no GTK, opens no window and touches no
+    display, so it keeps working in exactly the situation where a diagnostic
+    matters most. It also writes nothing — not the config directory, not a data
+    file — so running it can never be what "fixed" a problem.
+
+    Counts are reported, never contents. Somebody's quotes and reminders are
+    personal, and a diagnostic is the kind of output that gets pasted into a bug
+    report.
+    """
+    problems: list[str] = []
+
+    print("REM Bubbles doctor")
+    print()
+    print(_doctor_line("Version:", f"{PROGRAM} {__version__}"))
+    print(_doctor_line("Python:", sys.version.split()[0]))
+    executable = console_script_path()
+    print(_doctor_line("Executable:", str(executable) if executable else "not found"))
+    print(_doctor_line("Config dir:", str(user_config_dir())))
+    print()
+
+    config = _doctor_config(problems)
+    _doctor_quotes(config, problems)
+    _doctor_reminders(config, problems)
+    notifications = "enabled" if (config is not None and config.notifications) else "disabled"
+    if config is None:
+        notifications = "disabled (the config could not be parsed)"
+    print(_doctor_line("Notifications:", notifications))
+    print()
+
+    _doctor_session()
+    print()
+
+    if problems:
+        for problem in problems:
+            print(f"Problem: {problem}", file=sys.stderr)
+        return 1
+
+    print("No problems found.")
+    return 0
+
+
 # -- GUI --------------------------------------------------------------------
 
 
@@ -644,6 +898,38 @@ def build_parser() -> argparse.ArgumentParser:
             "Create ~/.config/rem-bubbles/ and a default config.toml. Existing "
             "files are never overwritten; the quote and reminder files are "
             "created by your first 'quote add' and 'reminder add'."
+        ),
+    )
+    commands.add_parser(
+        "doctor",
+        help="check the configuration and session, changing nothing",
+        description=(
+            "Report where REM Bubbles reads its configuration and data from and "
+            "whether all of it parses. Never opens a window, never imports GTK "
+            "and never writes anything. Counts are shown, never the contents of "
+            "your quotes or reminders. Exits 1 if something is malformed."
+        ),
+    )
+
+    integration = commands.add_parser(
+        "integration",
+        help="print desktop autostart configuration",
+        description=(
+            "Print the configuration needed to start REM Bubbles with your "
+            "desktop session. Nothing is ever written or reloaded — the "
+            "snippet is yours to add."
+        ),
+    )
+    integration_actions = integration.add_subparsers(
+        dest="integration_command", metavar="target", required=True
+    )
+    integration_actions.add_parser(
+        "hyprland",
+        help="print the exec-once line for hyprland.conf",
+        description=(
+            "Print an 'exec-once' line naming this installation's executable. "
+            "It is printed only: your Hyprland configuration is not edited and "
+            "Hyprland is not reloaded."
         ),
     )
 
@@ -727,13 +1013,25 @@ _REMINDER_HANDLERS = {
     "disable": cmd_reminder_disable,
 }
 
+_INTEGRATION_HANDLERS = {
+    "hyprland": cmd_integration_hyprland,
+}
+
+#: Commands with no sub-action of their own.
+_HANDLERS = {
+    "init": cmd_init,
+    "doctor": cmd_doctor,
+}
+
 
 def _handler(args: argparse.Namespace):
     if args.command == "quote":
         return _QUOTE_HANDLERS[args.quote_command]
     if args.command == "reminder":
         return _REMINDER_HANDLERS[args.reminder_command]
-    return cmd_init
+    if args.command == "integration":
+        return _INTEGRATION_HANDLERS[args.integration_command]
+    return _HANDLERS[args.command]
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -8,7 +8,10 @@ widget.
 Reminders take presentation priority over quotes, but this module decides
 nothing about *when*. It asks a :class:`~rem_bubbles.reminder_store.ReminderStore`
 "what is due now?" on a timer and renders the answer; recurrence, snooze
-expiry, dismissal and ordering all live in that GTK-free engine.
+expiry, dismissal and ordering all live in that GTK-free engine. Desktop
+notifications follow the same split: the window hands the store's own due list
+to a :class:`~rem_bubbles.notifications.NotificationCenter` and lets it decide
+whether anything is worth announcing.
 
 This module imports GTK, so it must only ever be imported *after*
 :mod:`rem_bubbles.app` has loaded libgtk4-layer-shell.
@@ -25,6 +28,11 @@ gi.require_version("Gtk4LayerShell", "1.0")
 from gi.repository import GLib, Gtk
 from gi.repository import Gtk4LayerShell as LayerShell
 
+from rem_bubbles.notifications import (
+    NotificationCenter,
+    format_occurrence,
+    select_active,
+)
 from rem_bubbles.quote_store import Quote, QuoteStore
 from rem_bubbles.reminder_store import (
     NONE,
@@ -33,6 +41,17 @@ from rem_bubbles.reminder_store import (
     ReminderStore,
     ReminderStoreError,
 )
+
+__all__ = [
+    "BUBBLE_GLYPH",
+    "CHECK_INTERVAL_SECONDS",
+    "DEFAULT_MARGIN_LEFT",
+    "DEFAULT_MARGIN_TOP",
+    "DUE_CSS_CLASS",
+    "LAYER_NAMESPACE",
+    "BubbleWindow",
+    "format_occurrence",
+]
 
 #: Glyph shown in the collapsed state.
 BUBBLE_GLYPH = "●"  # ●
@@ -54,20 +73,6 @@ CHECK_INTERVAL_SECONDS = 30
 DUE_CSS_CLASS = "rem-bubble-due"
 
 
-def format_occurrence(value: datetime) -> str:
-    """A scheduled time as a person reads it: ``Aug 30 · 6:00 PM``.
-
-    Written out rather than handed to ``strftime`` with ``%-d``/``%-I``, since
-    those are a glibc extension and the padding they strip is the whole point.
-    """
-    hour = value.hour % 12 or 12
-    meridiem = "AM" if value.hour < 12 else "PM"
-    return (
-        f"{value.strftime('%b')} {value.day} · "  # ·
-        f"{hour}:{value.minute:02d} {meridiem}"
-    )
-
-
 class BubbleWindow(Gtk.ApplicationWindow):
     """A tiny always-on-top overlay that toggles between bubble and card.
 
@@ -81,6 +86,11 @@ class BubbleWindow(Gtk.ApplicationWindow):
     ``poll_seconds`` of 0 disables the periodic check, which is what automated
     verification uses: it drives :meth:`refresh_reminders` with explicit
     datetimes instead of waiting for wall-clock time to pass.
+
+    ``notifier`` is an optional
+    :class:`~rem_bubbles.notifications.NotificationCenter`. Without one the
+    window behaves exactly as it did in Milestone 4, which is also what happens
+    whenever ``[notifications].enabled`` is false.
     """
 
     def __init__(
@@ -91,12 +101,15 @@ class BubbleWindow(Gtk.ApplicationWindow):
         margin_top: int = DEFAULT_MARGIN_TOP,
         margin_left: int = DEFAULT_MARGIN_LEFT,
         poll_seconds: int = CHECK_INTERVAL_SECONDS,
+        notifier: NotificationCenter | None = None,
     ) -> None:
         super().__init__(application=application, title="REM Bubbles")
 
         self._store = store
         self._reminders = reminders if reminders is not None else ReminderStore.empty()
+        self._notifier = notifier
         self._active: Reminder | None = None
+        self._preferred_id: str | None = None
         self._tick_source: int | None = None
 
         self.set_decorated(False)
@@ -301,18 +314,39 @@ class BubbleWindow(Gtk.ApplicationWindow):
         """Ask the reminder engine what is due, every ``poll_seconds``.
 
         A GLib timeout on the main loop: no worker thread, no busy loop, and no
-        work at all between ticks. It is removed when the window goes away so a
-        closed bubble leaves nothing running.
+        work at all between ticks. Registered exactly once, from ``__init__``,
+        so the timer's lifetime is the window's — activating an already-running
+        instance reuses that window and cannot add a second timer.
         """
         if poll_seconds <= 0:
             return
         self._tick_source = GLib.timeout_add_seconds(poll_seconds, self._on_tick)
-        self.connect("destroy", lambda _window: self._stop_scheduler())
+        self.connect("destroy", lambda _window: self.shutdown())
+
+    @property
+    def scheduler_running(self) -> bool:
+        """Whether the periodic check is currently registered."""
+        return self._tick_source is not None
 
     def _stop_scheduler(self) -> None:
         if self._tick_source is not None:
             GLib.source_remove(self._tick_source)
             self._tick_source = None
+
+    def shutdown(self) -> None:
+        """Drop everything transient this window owns. Safe to call twice.
+
+        The single place the timer is removed, whatever ended the process:
+        Ctrl+C, SIGTERM, the window being destroyed, or an ordinary quit all
+        arrive here. Idempotence is what makes that safe — the application calls
+        it during shutdown, and GTK calls it again through ``destroy``.
+
+        Only in-memory state is touched. Nothing is written, so a shutdown can
+        never be the thing that changes a reminder.
+        """
+        self._stop_scheduler()
+        if self._notifier is not None:
+            self._notifier.reset()
 
     def _on_tick(self) -> bool:
         self.refresh_reminders()
@@ -328,12 +362,20 @@ class BubbleWindow(Gtk.ApplicationWindow):
     def refresh_reminders(self, now: datetime | None = None) -> None:
         """Re-ask what is due and bring the window into line with the answer.
 
-        Everything time-dependent happens inside the store: this picks the first
-        of its ordered due reminders, which is the oldest waiting occurrence.
-        Called on startup, on every tick, and immediately after a snooze or a
-        dismissal so the next waiting reminder appears without another wait.
+        Everything time-dependent happens inside the store: this asks it once
+        for its ordered due list and uses that one answer for both the card and
+        the desktop notifications, so the two can never disagree about what is
+        waiting. Called on startup, on every tick, and immediately after a
+        snooze or a dismissal so the next waiting reminder appears without
+        another wait.
         """
-        self._active = self._reminders.next_due(now)
+        due = self._reminders.due_reminders(now)
+        self._active = select_active(due, self._preferred_id)
+        if self._active is None or self._active.id != self._preferred_id:
+            # The reminder a notification asked for is no longer the one being
+            # shown — it was dealt with, or something older came round. Drop the
+            # preference rather than letting it override the ordering forever.
+            self._preferred_id = None
 
         if self._active is None:
             self._bubble.remove_css_class(DUE_CSS_CLASS)
@@ -343,7 +385,24 @@ class BubbleWindow(Gtk.ApplicationWindow):
             self._bubble.set_tooltip_text("REM Bubbles — a reminder is waiting")
             self._show_reminder(self._active, now)
 
+        if self._notifier is not None:
+            self._notifier.evaluate(self._reminders, due, now)
+
         self._present()
+
+    def focus_reminder(self, reminder_id: str, now: datetime | None = None) -> bool:
+        """Show this reminder's card, if it is still waiting. Returns whether.
+
+        This is what a clicked desktop notification arrives at. The reminder may
+        well be gone by the time the click happens — snoozed, dismissed, or its
+        occurrence passed — so the id is a request, never an instruction: an
+        unknown or no-longer-due one simply expands the window onto whatever is
+        currently relevant instead of resurrecting something finished.
+        """
+        self._preferred_id = reminder_id
+        self.refresh_reminders(now)
+        self.expand()
+        return self._active is not None and self._active.id == reminder_id
 
     def _show_reminder(self, reminder: Reminder, now: datetime | None = None) -> None:
         self._reminder_label.set_label(reminder.text)
@@ -371,7 +430,9 @@ class BubbleWindow(Gtk.ApplicationWindow):
         The store persists before it mutates, so a failure here means the file
         and the collection both still say the reminder is waiting — and leaving
         it on screen is then the honest thing to do. Silently clearing the card
-        would tell the user something was handled when it was not.
+        would tell the user something was handled when it was not. The desktop
+        notification is taken down only after the change has reached the disk,
+        for the same reason.
         """
         reminder = self._active
         if reminder is None:
@@ -388,6 +449,8 @@ class BubbleWindow(Gtk.ApplicationWindow):
                 file=sys.stderr,
             )
             return
+        if self._notifier is not None:
+            self._notifier.withdraw(reminder.id)
         self.refresh_reminders(now)
 
     # -- quote presentation -----------------------------------------------

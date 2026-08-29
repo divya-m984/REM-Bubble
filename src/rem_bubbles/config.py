@@ -8,8 +8,10 @@ Two responsibilities live here, both GTK-free:
 
 ``tomllib`` is standard library from Python 3.11, so minimal configuration
 support costs no dependency. This is still not a settings framework: the only
-recognised keys are ``[quotes].file`` and ``[reminders].file``, and both are
-optional — a Milestone 3 config naming only quotes stays valid untouched.
+recognised keys are ``[quotes].file``, ``[reminders].file`` and
+``[notifications].enabled``, and all three are optional — a Milestone 3 config
+naming only quotes stays valid untouched, and so does a Milestone 4 one naming
+quotes and reminders.
 
 Quotes and reminders resolve differently on purpose. A quote collection falls
 back through repository data so the bubble always has something to show; a
@@ -38,16 +40,19 @@ __all__ = [
     "DEFAULT_CONFIG_TEXT",
     "EXAMPLE_QUOTES",
     "LOCAL_QUOTES",
+    "NOTIFICATIONS_DEFAULT",
     "QUOTES_FILENAME",
     "REMINDERS_FILENAME",
     "REPO_ROOT",
     "UserConfig",
     "default_quote_file",
     "default_reminder_file",
+    "load_notification_preference",
     "load_quote_store",
     "load_reminder_store",
     "managed_quote_file",
     "managed_reminder_file",
+    "notifications_enabled",
     "quote_file_candidates",
     "read_user_config",
     "reminder_file",
@@ -62,12 +67,19 @@ CONFIG_FILENAME = "config.toml"
 QUOTES_FILENAME = "quotes.json"
 REMINDERS_FILENAME = "reminders.json"
 
-#: What ``rem-bubbles init`` writes when no config file exists yet. Both tables
-#: name their default location, so the file documents itself; neither is
-#: required, and an existing config is never rewritten to add the second one.
+#: Desktop notifications are off unless a user asks for them. Updating REM
+#: Bubbles must never start putting notifications on somebody's screen, so the
+#: default is False and a config with no ``[notifications]`` table means False.
+NOTIFICATIONS_DEFAULT = False
+
+#: What ``rem-bubbles init`` writes when no config file exists yet. Every table
+#: names its default, so the file documents itself and shows where the
+#: notification switch lives; none of them is required, and an existing config
+#: is never rewritten to add a table it predates.
 DEFAULT_CONFIG_TEXT = (
     f'[quotes]\nfile = "{QUOTES_FILENAME}"\n'
     f'\n[reminders]\nfile = "{REMINDERS_FILENAME}"\n'
+    "\n[notifications]\nenabled = false\n"
 )
 
 #: Repository checkout root, as seen from ``src/rem_bubbles/config.py``.
@@ -131,12 +143,17 @@ class UserConfig:
     declares no such path; both mean "use the default location", which is not an
     error. In particular a Milestone 3 config with only ``[quotes]`` is complete:
     reminders simply live at their default path.
+
+    ``notifications`` is a plain bool rather than an optional one, because there
+    is no difference between "not configured" and "off" — both mean no desktop
+    notifications, which is what every config written before Milestone 5 says.
     """
 
     path: Path
     exists: bool
     quote_file: Path | None = None
     reminder_file: Path | None = None
+    notifications: bool = NOTIFICATIONS_DEFAULT
 
 
 def _resolve_path(raw: str, config_file: Path) -> Path:
@@ -188,6 +205,37 @@ def _table_file(
     return _resolve_path(raw_file, config_file)
 
 
+def _table_flag(
+    data: dict[str, object], table: str, key: str, default: bool, config_file: Path
+) -> bool:
+    """Read a boolean switch out of an optional table, or return ``default``.
+
+    Held to the same standard as ``file``: an absent table or absent key is
+    fine, a table of the wrong type or a value that is not a real boolean is
+    not. ``bool`` is a subclass of ``int``, but TOML has distinct types, so
+    ``enabled = 1`` arrives as an int here and is refused — quietly reading it
+    as true would be guessing at whether somebody wanted notifications.
+    """
+    section = data.get(table)
+    if section is None:
+        return default
+    if not isinstance(section, dict):
+        raise ConfigError(
+            f"In {config_file}: [{table}] must be a table, "
+            f"but it is {type(section).__name__}."
+        )
+
+    raw = section.get(key)
+    if raw is None:
+        return default
+    if not isinstance(raw, bool):
+        raise ConfigError(
+            f'In {config_file}: [{table}] "{key}" must be true or false, '
+            f"but it is {type(raw).__name__}."
+        )
+    return raw
+
+
 def read_user_config(path: Path | str | None = None) -> UserConfig:
     """Read ``config.toml``, raising :class:`ConfigError` on anything malformed.
 
@@ -214,6 +262,9 @@ def read_user_config(path: Path | str | None = None) -> UserConfig:
         exists=True,
         quote_file=_table_file(data, "quotes", config_file),
         reminder_file=_table_file(data, "reminders", config_file),
+        notifications=_table_flag(
+            data, "notifications", "enabled", NOTIFICATIONS_DEFAULT, config_file
+        ),
     )
 
 
@@ -239,6 +290,40 @@ def managed_reminder_file(config: UserConfig | None = None) -> Path:
     """
     config = config if config is not None else read_user_config()
     return config.reminder_file or default_reminder_file()
+
+
+# -- notifications ----------------------------------------------------------
+
+
+def notifications_enabled(config: UserConfig | None = None) -> bool:
+    """Whether the user asked for desktop notifications. Default: no.
+
+    Raises :class:`ConfigError` when ``config.toml`` is malformed, so a
+    management command still refuses to guess. The application catches that and
+    falls back to :data:`NOTIFICATIONS_DEFAULT` — see
+    :func:`load_notification_preference`.
+    """
+    config = config if config is not None else read_user_config()
+    return config.notifications
+
+
+def load_notification_preference() -> bool:
+    """The notification switch for the running application, never raising.
+
+    A broken config is reported to stderr and treated as "off". That direction
+    is not arbitrary: guessing wrong towards *on* would put notifications on a
+    screen because a config file had a typo in it, which is precisely the
+    surprise the ``false`` default exists to prevent.
+    """
+    try:
+        return notifications_enabled()
+    except ConfigError as exc:
+        print(f"rem-bubbles: {exc}", file=sys.stderr)
+        print(
+            "rem-bubbles: desktop notifications stay off until the config is fixed",
+            file=sys.stderr,
+        )
+        return NOTIFICATIONS_DEFAULT
 
 
 # -- runtime quote sources --------------------------------------------------
