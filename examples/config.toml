@@ -13,3 +13,11 @@
 # ~/.config/rem-bubbles/quotes.json. An absolute path or one starting with ~
 # is also accepted, for keeping quotes somewhere else entirely.
 file = "quotes.json"
+
+[reminders]
+# Where your personal reminders live. Same path rules as [quotes].
+#
+# This whole table is optional: leave it out and reminders still live at
+# ~/.config/rem-bubbles/reminders.json. A config written before reminders
+# existed needs no changes.
+file = "reminders.json"

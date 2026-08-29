@@ -14,8 +14,12 @@ from unittest import mock
 from rem_bubbles.config import (
     ConfigError,
     default_quote_file,
+    default_reminder_file,
+    load_reminder_store,
     managed_quote_file,
+    managed_reminder_file,
     read_user_config,
+    reminder_file,
     user_config_dir,
     user_config_file,
 )
@@ -83,10 +87,32 @@ class ConfigDirectoryTests(IsolatedConfigTestCase):
     def test_default_quote_file_path(self):
         self.assertEqual(default_quote_file(), self.config_dir / "quotes.json")
 
+    def test_default_reminder_file_path(self):
+        self.assertEqual(default_reminder_file(), self.config_dir / "reminders.json")
+
+    def test_default_reminder_file_follows_xdg_config_home(self):
+        with tempfile.TemporaryDirectory() as elsewhere:
+            with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": elsewhere}):
+                self.assertEqual(
+                    default_reminder_file(),
+                    Path(elsewhere) / "rem-bubbles" / "reminders.json",
+                )
+
+    def test_default_reminder_file_falls_back_to_dot_config(self):
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("XDG_CONFIG_HOME", None)
+                with mock.patch.object(Path, "home", return_value=Path(home)):
+                    self.assertEqual(
+                        default_reminder_file(),
+                        Path(home) / ".config" / "rem-bubbles" / "reminders.json",
+                    )
+
     def test_resolution_does_not_create_anything(self):
         user_config_dir()
         user_config_file()
         default_quote_file()
+        default_reminder_file()
         self.assertFalse(self.config_dir.exists())
 
 
@@ -202,6 +228,252 @@ class ConfigErrorTests(IsolatedConfigTestCase):
 
 
 # -- management target ------------------------------------------------------
+
+
+class ReminderConfigTests(IsolatedConfigTestCase):
+    """``[reminders]`` follows exactly the same rules as ``[quotes]``."""
+
+    def test_missing_config_declares_no_reminder_file(self):
+        self.assertIsNone(read_user_config().reminder_file)
+
+    def test_a_quote_only_config_stays_valid(self):
+        # The Milestone 3 config, unmodified. This must keep working forever.
+        self.write_config('[quotes]\nfile = "quotes.json"\n')
+        config = read_user_config()
+        self.assertEqual(config.quote_file, self.config_dir / "quotes.json")
+        self.assertIsNone(config.reminder_file)
+
+    def test_a_quote_only_config_still_finds_reminders(self):
+        self.write_config('[quotes]\nfile = "quotes.json"\n')
+        self.assertEqual(managed_reminder_file(), self.config_dir / "reminders.json")
+
+    def test_reminders_table_without_file_key(self):
+        self.write_config("[quotes]\n[reminders]\n")
+        self.assertIsNone(read_user_config().reminder_file)
+
+    def test_a_reminders_only_config_is_valid(self):
+        self.write_config('[reminders]\nfile = "reminders.json"\n')
+        config = read_user_config()
+        self.assertIsNone(config.quote_file)
+        self.assertEqual(config.reminder_file, self.config_dir / "reminders.json")
+
+    def test_relative_path_resolves_against_the_config_directory(self):
+        self.write_config('[reminders]\nfile = "reminders.json"\n')
+        self.assertEqual(
+            read_user_config().reminder_file, self.config_dir / "reminders.json"
+        )
+
+    def test_relative_subdirectory_path(self):
+        self.write_config('[reminders]\nfile = "personal/mine.json"\n')
+        self.assertEqual(
+            read_user_config().reminder_file,
+            self.config_dir / "personal" / "mine.json",
+        )
+
+    def test_relative_path_is_independent_of_the_working_directory(self):
+        self.write_config('[reminders]\nfile = "reminders.json"\n')
+        with tempfile.TemporaryDirectory() as elsewhere:
+            previous = Path.cwd()
+            os.chdir(elsewhere)
+            try:
+                self.assertEqual(
+                    read_user_config().reminder_file,
+                    self.config_dir / "reminders.json",
+                )
+            finally:
+                os.chdir(previous)
+
+    def test_absolute_path_is_used_verbatim(self):
+        self.write_config('[reminders]\nfile = "/some/private/place/mine.json"\n')
+        self.assertEqual(
+            read_user_config().reminder_file, Path("/some/private/place/mine.json")
+        )
+
+    def test_tilde_is_expanded(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.write_config('[reminders]\nfile = "~/notes/reminders.json"\n')
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                self.assertEqual(
+                    read_user_config().reminder_file,
+                    Path(home) / "notes" / "reminders.json",
+                )
+
+    def test_dot_segments_are_normalised(self):
+        self.write_config('[reminders]\nfile = "../rem-bubbles/reminders.json"\n')
+        self.assertEqual(
+            read_user_config().reminder_file, self.config_dir / "reminders.json"
+        )
+
+    def test_both_tables_are_read(self):
+        self.write_config(
+            '[quotes]\nfile = "q.json"\n\n[reminders]\nfile = "r.json"\n'
+        )
+        config = read_user_config()
+        self.assertEqual(config.quote_file, self.config_dir / "q.json")
+        self.assertEqual(config.reminder_file, self.config_dir / "r.json")
+
+    def test_reading_does_not_create_the_reminder_file(self):
+        self.write_config('[reminders]\nfile = "reminders.json"\n')
+        read_user_config()
+        self.assertFalse((self.config_dir / "reminders.json").exists())
+
+
+class ReminderConfigErrorTests(IsolatedConfigTestCase):
+    def assertRejects(self, text, needle):
+        self.write_config(text)
+        with self.assertRaises(ConfigError) as caught:
+            read_user_config()
+        self.assertIn(needle, str(caught.exception))
+
+    def test_reminders_is_not_a_table(self):
+        self.assertRejects(
+            'reminders = "reminders.json"\n', "[reminders] must be a table"
+        )
+
+    def test_reminders_is_an_array(self):
+        self.assertRejects('reminders = ["a", "b"]\n', "[reminders] must be a table")
+
+    def test_file_is_not_a_string(self):
+        self.assertRejects("[reminders]\nfile = 7\n", '"file" must be a string')
+
+    def test_file_is_a_boolean(self):
+        self.assertRejects("[reminders]\nfile = true\n", '"file" must be a string')
+
+    def test_file_is_an_array(self):
+        self.assertRejects('[reminders]\nfile = ["a.json"]\n', '"file" must be a string')
+
+    def test_blank_file_value(self):
+        self.assertRejects('[reminders]\nfile = ""\n', '"file" is blank')
+
+    def test_whitespace_only_file_value(self):
+        self.assertRejects('[reminders]\nfile = "   "\n', '"file" is blank')
+
+    def test_the_message_names_the_reminders_table(self):
+        self.write_config('[quotes]\nfile = "q.json"\n\n[reminders]\nfile = 7\n')
+        with self.assertRaises(ConfigError) as caught:
+            read_user_config()
+        self.assertIn("[reminders]", str(caught.exception))
+
+    def test_a_broken_quotes_table_is_reported_first(self):
+        # Quotes are validated first, so the message stays predictable.
+        self.write_config("[quotes]\nfile = 7\n\n[reminders]\nfile = 9\n")
+        with self.assertRaises(ConfigError) as caught:
+            read_user_config()
+        self.assertIn("[quotes]", str(caught.exception))
+
+
+class ReminderSourceTests(IsolatedConfigTestCase):
+    """The runtime chain: explicit, then configured, then default. No fallback."""
+
+    def test_defaults_to_the_xdg_location(self):
+        self.assertEqual(reminder_file(), self.config_dir / "reminders.json")
+
+    def test_follows_the_configured_path(self):
+        self.write_config(f'[reminders]\nfile = "{self.xdg}/elsewhere.json"\n')
+        self.assertEqual(reminder_file(), self.xdg / "elsewhere.json")
+
+    def test_an_explicit_path_wins(self):
+        self.write_config('[reminders]\nfile = "configured.json"\n')
+        self.assertEqual(reminder_file("/tmp/explicit.json"), Path("/tmp/explicit.json"))
+
+    def test_never_points_into_the_repository(self):
+        # examples/reminders.json is documentation. It must never be loaded as
+        # somebody's real reminders.
+        self.assertNotIn("examples", reminder_file().parts)
+
+    def test_missing_default_file_is_an_empty_store(self):
+        store = load_reminder_store()
+        self.assertEqual(len(store), 0)
+
+    def test_missing_default_file_is_silent(self):
+        import contextlib
+        import io
+
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            load_reminder_store()
+        self.assertEqual(errors.getvalue(), "")
+
+    def test_a_default_path_named_in_the_config_is_still_silent(self):
+        # 'rem-bubbles init' writes exactly this, so warning here would put a
+        # line on stderr at every launch until the first reminder is added.
+        import contextlib
+        import io
+
+        self.write_config('[reminders]\nfile = "reminders.json"\n')
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            store = load_reminder_store()
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(len(store), 0)
+
+    def test_a_missing_configured_file_elsewhere_is_reported(self):
+        import contextlib
+        import io
+
+        self.write_config(f'[reminders]\nfile = "{self.xdg}/nowhere.json"\n')
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            store = load_reminder_store()
+        self.assertIn("not found", errors.getvalue())
+        self.assertEqual(len(store), 0)
+
+    def test_malformed_reminder_data_degrades_to_empty(self):
+        import contextlib
+        import io
+
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        (self.config_dir / "reminders.json").write_text("{not json", encoding="utf-8")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            store = load_reminder_store()
+        self.assertIn("not valid JSON", errors.getvalue())
+        self.assertNotIn("Traceback", errors.getvalue())
+        self.assertEqual(len(store), 0)
+
+    def test_a_malformed_config_degrades_to_empty(self):
+        import contextlib
+        import io
+
+        self.write_config("[reminders]\nfile = 7\n")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            store = load_reminder_store()
+        self.assertIn("must be a string", errors.getvalue())
+        self.assertEqual(len(store), 0)
+
+    def test_a_valid_file_is_loaded(self):
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        (self.config_dir / "reminders.json").write_text(
+            '[{"id": "r", "text": "Do it.", "due_at": "2026-08-30T18:00:00"}]',
+            encoding="utf-8",
+        )
+        store = load_reminder_store()
+        self.assertEqual([r.id for r in store.reminders], ["r"])
+
+    def test_loading_does_not_create_the_file(self):
+        load_reminder_store()
+        self.assertFalse((self.config_dir / "reminders.json").exists())
+        self.assertFalse(self.config_dir.exists())
+
+
+class ManagedReminderFileTests(IsolatedConfigTestCase):
+    def test_defaults_to_the_xdg_location(self):
+        self.assertEqual(managed_reminder_file(), self.config_dir / "reminders.json")
+
+    def test_follows_the_configured_path(self):
+        self.write_config('[reminders]\nfile = "/tmp/rem-bubbles-test/elsewhere.json"\n')
+        self.assertEqual(
+            managed_reminder_file(), Path("/tmp/rem-bubbles-test/elsewhere.json")
+        )
+
+    def test_never_points_into_the_repository(self):
+        self.assertNotIn("examples", managed_reminder_file().parts)
+
+    def test_malformed_config_propagates(self):
+        self.write_config("[reminders]\nfile = 7\n")
+        with self.assertRaises(ConfigError):
+            managed_reminder_file()
 
 
 class ManagedQuoteFileTests(IsolatedConfigTestCase):

@@ -48,6 +48,22 @@ window.rem-window > widget,
   background-color: rgba(40, 58, 46, 0.96);
 }
 
+/* A reminder is waiting: the same bubble, warmer. A brighter ring and a filled
+ * glow, no animation — this has to be noticeable at the edge of vision without
+ * ever becoming something to want to switch off. */
+.rem-bubble.rem-bubble-due {
+  border-color: rgba(224, 135, 60, 0.95);
+  background-color: rgba(56, 34, 16, 0.92);
+  box-shadow: 0 0 6px 1px rgba(224, 135, 60, 0.45);
+  color: #f0a55c;
+}
+
+.rem-bubble.rem-bubble-due:hover {
+  background-color: rgba(74, 45, 21, 0.96);
+  border-color: rgba(240, 165, 92, 1);
+  color: #f6c48c;
+}
+
 /* --- expanded quote card ------------------------------------------------- */
 
 .rem-card {
@@ -80,6 +96,83 @@ window.rem-window > widget,
   color: rgba(127, 168, 130, 0.85);
   font-size: 11px;
   letter-spacing: 0.4px;
+}
+
+/* --- expanded reminder card ---------------------------------------------- */
+
+/* Inherits .rem-card entirely; only the accent changes, so a due reminder
+ * reads as the same object in a different mood. */
+.rem-reminder-card {
+  border-color: rgba(224, 135, 60, 0.45);
+}
+
+.rem-reminder-heading {
+  color: #e0873c;
+}
+
+.rem-reminder-text {
+  color: #ece5d8;
+  font-size: 13px;
+  padding-bottom: 2px;
+}
+
+.rem-reminder-meta {
+  color: rgba(224, 135, 60, 0.85);
+  font-size: 11px;
+  letter-spacing: 0.4px;
+}
+
+.rem-reminder-actions {
+  padding-top: 4px;
+}
+
+.rem-snooze,
+.rem-dismiss {
+  min-height: 22px;
+  padding: 2px 12px;
+
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+
+  transition: background-color 120ms ease-out, border-color 120ms ease-out,
+    color 120ms ease-out;
+}
+
+/* Snooze is the quieter of the two: outlined, forest green. */
+.rem-snooze {
+  border: 1px solid rgba(127, 168, 130, 0.45);
+  background-color: transparent;
+  background-image: none;
+  color: rgba(236, 229, 216, 0.80);
+}
+
+.rem-snooze:hover {
+  background-color: rgba(127, 168, 130, 0.18);
+  border-color: rgba(127, 168, 130, 0.85);
+  color: #7fa882;
+}
+
+.rem-snooze:active {
+  background-color: rgba(127, 168, 130, 0.28);
+}
+
+/* Dismiss is the affirmative one: tiger orange. */
+.rem-dismiss {
+  border: 1px solid rgba(224, 135, 60, 0.55);
+  background-color: rgba(224, 135, 60, 0.14);
+  background-image: none;
+  color: #e0873c;
+}
+
+.rem-dismiss:hover {
+  background-color: rgba(224, 135, 60, 0.26);
+  border-color: rgba(224, 135, 60, 0.90);
+  color: #f0a55c;
+}
+
+.rem-dismiss:active {
+  background-color: rgba(224, 135, 60, 0.36);
 }
 
 /* --- quote navigation ---------------------------------------------------- */

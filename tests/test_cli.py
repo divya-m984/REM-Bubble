@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from rem_bubbles import cli
+from rem_bubbles.config import read_user_config
 
 from test_config import IsolatedConfigTestCase
 
@@ -78,15 +79,35 @@ class ImportIsolationTests(unittest.TestCase):
         self.assertIn("rem-bubbles", result.stdout)
         self.assertEqual(result.stderr, "")
 
-    def test_config_and_quote_store_import_no_gtk(self):
+    def test_config_and_stores_import_no_gtk(self):
         script = (
-            "import sys; import rem_bubbles.config, rem_bubbles.quote_store; "
+            "import sys; import rem_bubbles.config, rem_bubbles.quote_store, "
+            "rem_bubbles.reminder_store, rem_bubbles.persistence; "
             "print('gi' in sys.modules)"
         )
         result = subprocess.run(
             [sys.executable, "-c", script], capture_output=True, text=True, cwd=REPO_ROOT
         )
         self.assertEqual(result.stdout.strip(), "False")
+
+    def test_the_reminder_engine_imports_no_layer_shell(self):
+        # The GTK-free guarantee is about more than 'gi': loading
+        # libgtk4-layer-shell out of order is what produced the Milestone 1 bug.
+        script = (
+            "import sys; import rem_bubbles.cli; "
+            "print(sorted(m for m in sys.modules "
+            "if 'layershell' in m.lower() or 'layer_shell' in m.lower() "
+            "or m.split('.')[0] in {'gi', 'ctypes'}))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env={**os.environ, "WAYLAND_DISPLAY": "", "DISPLAY": ""},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "[]")
 
 
 # -- parsing ----------------------------------------------------------------
@@ -161,6 +182,72 @@ class ParserTests(unittest.TestCase):
         status, _, _ = run_expecting_exit(["quote", "remove"])
         self.assertEqual(status, 2)
 
+    # -- reminder subcommands ---------------------------------------------
+
+    def test_reminder_list(self):
+        args = self.parse(["reminder", "list"])
+        self.assertEqual((args.command, args.reminder_command), ("reminder", "list"))
+
+    def test_reminder_add_arguments(self):
+        args = self.parse(
+            ["reminder", "add", "Do it.", "--at", "2026-08-30 18:00", "--id", "x"]
+        )
+        self.assertEqual(args.text, "Do it.")
+        self.assertEqual(args.at, "2026-08-30 18:00")
+        self.assertEqual(args.id, "x")
+        self.assertEqual(args.repeat, "none")
+        self.assertFalse(args.disabled)
+
+    def test_reminder_add_repeat_choices(self):
+        for value in ("none", "daily", "weekly"):
+            args = self.parse(
+                ["reminder", "add", "Do it.", "--at", "2026-08-30 18:00",
+                 "--repeat", value]
+            )
+            self.assertEqual(args.repeat, value)
+
+    def test_reminder_add_rejects_an_unsupported_repeat(self):
+        status, _, _ = run_expecting_exit(
+            ["reminder", "add", "Do it.", "--at", "2026-08-30 18:00",
+             "--repeat", "monthly"]
+        )
+        self.assertEqual(status, 2)
+
+    def test_reminder_add_disabled_flag(self):
+        args = self.parse(
+            ["reminder", "add", "Do it.", "--at", "2026-08-30 18:00", "--disabled"]
+        )
+        self.assertTrue(args.disabled)
+
+    def test_reminder_add_requires_at(self):
+        status, _, _ = run_expecting_exit(["reminder", "add", "Do it."])
+        self.assertEqual(status, 2)
+
+    def test_reminder_id_bearing_commands(self):
+        for name in ("remove", "enable", "disable"):
+            args = self.parse(["reminder", name, "some-id"])
+            self.assertEqual(args.id, "some-id")
+
+    def test_reminder_without_an_action_is_a_usage_error(self):
+        status, _, _ = run_expecting_exit(["reminder"])
+        self.assertEqual(status, 2)
+
+    def test_reminder_help_exits_zero(self):
+        status, output, _ = run_expecting_exit(["reminder", "--help"])
+        self.assertEqual(status, 0)
+        for name in ("list", "add", "remove", "enable", "disable"):
+            self.assertIn(name, output)
+
+    def test_top_level_help_lists_reminder(self):
+        _, output, _ = run_expecting_exit(["--help"])
+        self.assertIn("reminder", output)
+
+    def test_no_edit_command_exists_yet(self):
+        # Rescheduling is remove-then-add for this milestone, on purpose.
+        for name in ("edit", "reschedule", "reset"):
+            status, _, _ = run_expecting_exit(["reminder", name, "an-id"])
+            self.assertEqual(status, 2)
+
 
 # -- GUI dispatch -----------------------------------------------------------
 
@@ -187,6 +274,13 @@ class GuiDispatchTests(unittest.TestCase):
                     cli.main(["quote", "list"])
         launch.assert_not_called()
 
+    def test_reminder_commands_never_launch_the_gui(self):
+        with mock.patch.object(cli, "run_gui", return_value=0) as launch:
+            with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    cli.main(["reminder", "list"])
+        launch.assert_not_called()
+
     def test_run_gui_passes_only_the_program_name(self):
         fake = mock.Mock(return_value=0)
         module = mock.Mock(main=fake)
@@ -204,6 +298,7 @@ class InitTests(IsolatedConfigTestCase):
         super().setUp()
         self.config_path = self.config_dir / "config.toml"
         self.quotes_path = self.config_dir / "quotes.json"
+        self.reminders_path = self.config_dir / "reminders.json"
 
     def test_creates_the_directory_and_config(self):
         status, output, _ = run(["init"])
@@ -212,11 +307,41 @@ class InitTests(IsolatedConfigTestCase):
         self.assertIn(str(self.config_path), output)
 
     def test_written_config_is_the_documented_default(self):
+        # A fresh config names both collections. Milestone 3 wrote only
+        # [quotes]; a config from then is still valid and is never rewritten
+        # (see test_a_quote_only_config_is_left_alone).
         run(["init"])
+        self.assertEqual(
+            self.config_path.read_text(encoding="utf-8"),
+            '[quotes]\nfile = "quotes.json"\n\n[reminders]\nfile = "reminders.json"\n',
+        )
+
+    def test_the_written_config_is_readable(self):
+        run(["init"])
+        config = read_user_config(self.config_path)
+        self.assertEqual(config.quote_file, self.quotes_path)
+        self.assertEqual(config.reminder_file, self.reminders_path)
+
+    def test_a_quote_only_config_is_left_alone(self):
+        # Backwards compatibility: a Milestone 3 user must not have their file
+        # rewritten just because [reminders] now exists as a concept.
+        self.write_config('[quotes]\nfile = "quotes.json"\n')
+        status, output, _ = run(["init"])
+        self.assertEqual(status, 0)
         self.assertEqual(
             self.config_path.read_text(encoding="utf-8"),
             '[quotes]\nfile = "quotes.json"\n',
         )
+        self.assertIn("left unchanged", output)
+
+    def test_does_not_create_a_reminder_file(self):
+        run(["init"])
+        self.assertFalse(self.reminders_path.exists())
+
+    def test_reports_the_reminder_file(self):
+        _, output, _ = run(["init"])
+        self.assertIn(str(self.reminders_path), output)
+        self.assertIn("reminder add", output)
 
     def test_the_directory_is_user_private(self):
         run(["init"])

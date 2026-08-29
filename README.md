@@ -4,18 +4,21 @@ A tiny persistent desktop quote and reminder companion for Wayland.
 
 A small bubble sits near the top-left of the desktop. Click it and it expands
 into a quote card showing the day's quote; click the collapse control and it
-shrinks back. It lives on the layer-shell overlay layer with an exclusive zone
-of `0`, so it floats above everything without reserving any space in the tiling
-layout.
+shrinks back. When a reminder falls due the bubble takes on a warm glow, and
+opening it shows the reminder instead, with **Snooze 10m** and **Dismiss**. It
+lives on the layer-shell overlay layer with an exclusive zone of `0`, so it
+floats above everything without reserving any space in the tiling layout.
 
 ## Status
 
-Milestone 3 — graphical foundation, the quote engine, and a terminal interface
-for managing your own quotes in `~/.config/rem-bubbles/`.
+Milestone 4 — graphical foundation, the quote engine, personal reminders with
+none/daily/weekly recurrence, and a terminal interface for managing both in
+`~/.config/rem-bubbles/`.
 
-Not implemented yet: reminders, scheduling and notifications; any quote editing
-in the GUI (no add button, edit dialog, delete button, settings window or file
-chooser); live reload of a running bubble.
+Not implemented yet: desktop notifications, a background daemon, autostart,
+sound, any editing in the GUI (no add button, edit dialog, delete button,
+calendar picker, settings window or file chooser), a `reminder edit` command,
+natural-language dates, timezone support, and live reload of a running bubble.
 
 ## Requirements
 
@@ -45,6 +48,7 @@ command that never opens a window:
 ```bash
 rem-bubbles gui                              # the same thing, explicitly
 rem-bubbles init                             # set up ~/.config/rem-bubbles/
+
 rem-bubbles quote list                       # show your quotes
 rem-bubbles quote add "Keep making weird things."
 rem-bubbles quote add "Read the error first." --author "Me"
@@ -52,6 +56,14 @@ rem-bubbles quote add "A quiet one." --id quiet --disabled
 rem-bubbles quote remove quiet               # exact id
 rem-bubbles quote enable quiet
 rem-bubbles quote disable quiet
+
+rem-bubbles reminder list                    # show your reminders
+rem-bubbles reminder add "Submit report" --at "2026-08-30 18:00"
+rem-bubbles reminder add "Weekly review" --at "2026-08-31 09:00" --repeat weekly
+rem-bubbles reminder enable weekly-review    # exact id
+rem-bubbles reminder disable weekly-review
+rem-bubbles reminder remove weekly-review
+
 rem-bubbles --help
 ```
 
@@ -61,63 +73,74 @@ The GUI can also still be started directly:
 .venv/bin/python -m rem_bubbles.app
 ```
 
-## Your quotes
+## Your data
 
-REM Bubbles keeps your quotes in your own configuration directory, following
-the XDG Base Directory convention:
+REM Bubbles keeps your quotes and reminders in your own configuration
+directory, following the XDG Base Directory convention:
 
 ```text
 ~/.config/rem-bubbles/
 ├── config.toml
-└── quotes.json
+├── quotes.json
+└── reminders.json
 ```
 
 If `$XDG_CONFIG_HOME` is set to an absolute path, `$XDG_CONFIG_HOME/rem-bubbles/`
 is used instead. Nothing in this repository is ever written to: **your quotes
-live outside the checkout and outside Git.** `examples/` is tracked sample data
-for reading, not personal storage.
+and reminders live outside the checkout and outside Git.** `examples/` is
+tracked sample data for reading, not personal storage.
 
 Get started with:
 
 ```bash
 rem-bubbles init
 rem-bubbles quote add "Keep making weird things."
+rem-bubbles reminder add "Submit report" --at "2026-08-30 18:00"
 ```
 
 `init` creates the directory and a default `config.toml`. It never overwrites
 an existing file, so running it twice is safe. It deliberately does not create
-`quotes.json` — your first `quote add` does that, which keeps the file
-containing only quotes you chose. `init` is optional: `quote add` alone creates
-everything it needs.
+`quotes.json` or `reminders.json` — your first `quote add` and `reminder add`
+do that, which keeps each file containing only entries you chose. `init` is
+optional: either `add` alone creates everything it needs.
 
 The directory is created `0700` and files `0600`, since this is personal data.
 Files that already exist keep whatever permissions you gave them.
 
 ### config.toml
 
-One table, one key:
+Two optional tables, one key each:
 
 ```toml
 [quotes]
 file = "quotes.json"
+
+[reminders]
+file = "reminders.json"
 ```
 
-`file` may be relative (resolved against the directory holding `config.toml`,
-so the above means `~/.config/rem-bubbles/quotes.json`), absolute, or start
-with `~`:
+Each `file` may be relative (resolved against the directory holding
+`config.toml`, so the above means `~/.config/rem-bubbles/quotes.json` and
+`~/.config/rem-bubbles/reminders.json`), absolute, or start with `~`:
 
 ```toml
 [quotes]
 file = "/some/private/location/my-quotes.json"
 ```
 
-That is the whole format for now — no theme, position or reminder settings.
+Both tables are optional and both default to the file beside the config, so **a
+`config.toml` written before reminders existed is still complete** — if it
+contains only `[quotes]`, reminders live at
+`~/.config/rem-bubbles/reminders.json` anyway, and `rem-bubbles init` will not
+rewrite your file to add the section.
+
+That is the whole format for now — no theme, position or snooze settings.
 
 A `config.toml` that cannot be understood is never guessed past. The GUI prints
-the problem to stderr and carries on with the default quote locations rather
-than refusing to open. Quote-management commands instead stop with an error and
-change nothing, because guessing there could write your quotes to a file you
-did not choose.
+the problem to stderr and carries on with the default locations rather than
+refusing to open. Management commands instead stop with an error and change
+nothing, because guessing there could write your data to a file you did not
+choose.
 
 ### Managing quotes
 
@@ -170,7 +193,7 @@ with `ensure_ascii=False`, two-space indentation and a trailing newline, so
 Quote changes are picked up when the application starts. If you run
 `rem-bubbles quote add ...` while the bubble is already running, the running
 window keeps the collection it loaded until you restart it. File watching and
-live reload may come later.
+live reload may come later. The same applies to reminders — see below.
 
 ## Quote file format
 
@@ -254,35 +277,262 @@ card in place — the application is not restarted — and collapsing then
 re-expanding the bubble keeps whatever quote you navigated to. Restarting the
 application returns to that day's deterministic quote.
 
+## Reminders
+
+A reminder is a piece of text with a time. When that time arrives the bubble
+takes on a warm orange glow, and opening it shows a **REMINDER** card instead of
+the quote card:
+
+```text
+╭──────────────────────────────╮
+│ REMINDER                   × │
+│                              │
+│ Submit the report.           │
+│                              │
+│ Overdue · Aug 30 · 6:00 PM   │
+│                              │
+│ [ Snooze 10m ]   [ Dismiss ] │
+╰──────────────────────────────╯
+```
+
+When nothing is due, REM Bubbles behaves exactly as it always has and shows
+quotes.
+
+### Managing reminders
+
+```bash
+rem-bubbles reminder list
+
+rem-bubbles reminder add "Submit report" \
+  --at "2026-08-30 18:00"
+
+rem-bubbles reminder add "Weekly review" \
+  --at "2026-08-31 09:00" \
+  --repeat weekly
+
+rem-bubbles reminder enable <id>
+rem-bubbles reminder disable <id>
+rem-bubbles reminder remove <id>
+```
+
+`--at` accepts `2026-08-30 18:00` or `2026-08-30T18:00`, with seconds optional,
+and stores `2026-08-30T18:00:00`. `--repeat` is `none` (the default), `daily` or
+`weekly`. `--id` sets the id explicitly and `--disabled` adds a reminder without
+scheduling it, exactly as for quotes.
+
+Ids are generated from the text the same way quotes' are —
+`Submit report` becomes `submit-report`, collisions get `-2`, `-3`, and text
+with no usable ASCII slug gets a stable digest like `reminder-a13f84c2`.
+`remove`, `enable` and `disable` take an **exact** id.
+
+`reminder list` prints the file it is managing, then each reminder with its id,
+text, scheduled time, recurrence and current status:
+
+```text
+Reminder file: /home/you/.config/rem-bubbles/reminders.json
+
+! submit-report
+  Submit the report.
+  Due: 2026-08-30 18:00
+  Status: overdue
+
+↻ review-week
+  Review my week.
+  Due: Weekly · 2026-08-31 09:00
+  Status: upcoming
+
+2 reminders (2 enabled, 0 disabled, 1 due)
+```
+
+`!` is waiting for you, `↻` recurring, `·` scheduled and quiet. Statuses are
+`upcoming`, `due`, `overdue`, `snoozed`, `dismissed` and `disabled`. Listing
+never creates or modifies anything; with no reminder file it says
+`No reminders yet.` and exits successfully.
+
+Adding a reminder whose time has already passed is allowed — it simply shows up
+overdue. There is no `reminder edit` yet: to reschedule, remove it and add it
+again.
+
+Unlike quotes, **an empty reminder collection is completely valid.** Zero
+reminders, all of them disabled, all of them dismissed — none of these is an
+error, and nothing forces one reminder to stay enabled.
+
+### Scheduling
+
+Times are **local wall-clock times**. A reminder at `08:00` is at 08:00 by the
+clock on your wall, whatever date it is. There is no timezone support in this
+milestone: a `due_at` carrying an offset or a `Z` is rejected rather than
+converted, because silently moving your 18:00 to 17:00 would be worse than
+refusing to load the file.
+
+Recurrence is `none`, `daily` or `weekly` and nothing else — no monthly, yearly
+or cron syntax.
+
+- `none` — one occurrence, at `due_at`. Dismiss it and it is finished.
+- `daily` — first at `due_at`, then every calendar day at the same time.
+- `weekly` — first at `due_at`, then every seven days at the same time.
+
+**Missed occurrences collapse.** If a daily 08:00 reminder went unseen Monday
+through Wednesday and you start REM Bubbles on Thursday at 10:00, there is one
+reminder waiting — Thursday's 08:00 — not four. A backlog of identical cards
+helps nobody.
+
+A reminder is waiting for you when it is enabled, its most recent occurrence is
+at or before now, that occurrence has not been dismissed, and it is not
+currently snoozed. An occurrence more than a minute old is described as
+**overdue** rather than **due now**.
+
+### Snooze and dismiss
+
+**Snooze 10m** sets `snoozed_until` to ten minutes from now and hides the
+reminder until then. The occurrence itself does not move: when the snooze
+expires the same occurrence becomes due again. Ten minutes is fixed in this
+milestone.
+
+**Dismiss** records the occurrence you just dealt with in
+`dismissed_occurrence` and clears any snooze. For a one-time reminder that is
+the end of it. For a recurring one it dismisses **only that occurrence** — the
+reminder stays enabled and comes back at its next scheduled time.
+
+The card's `×` only collapses the bubble. It does not dismiss, snooze or
+disable anything; the reminder is still waiting when you open it again.
+
+`enable` and `disable` do not touch `snoozed_until` or `dismissed_occurrence`
+either. Disabling is a pause, not a reset, so re-enabling resumes the schedule
+where it was rather than replaying something you already handled.
+
+### While REM Bubbles is running
+
+The window asks the reminder engine what is due every 30 seconds — a GLib
+timeout on the main loop, no worker thread and no filesystem polling. That is
+enough to notice a reminder falling due and a snooze expiring while you work.
+
+If more than one reminder is due they are ordered by occurrence, oldest first,
+with the id breaking ties, and one is shown at a time. Snoozing or dismissing
+the one on screen immediately re-evaluates the queue: the next waiting reminder
+appears straight away, and when none are left the quote card comes back at
+whatever quote you had navigated to.
+
+**There is no daemon.** While REM Bubbles is not running, nothing wakes up and
+nothing notifies you. Reminders that fell due in the meantime are evaluated the
+next time you start it, and appear then — collapsed to their most recent
+occurrence.
+
+There are no desktop notifications, no sound, and no autostart in this
+milestone. Reminder presentation stays inside the REM Bubbles window.
+
+### Reminder file format
+
+Reminders live in a JSON array of objects:
+
+```json
+[
+  {
+    "id": "submit-report",
+    "text": "Submit the report.",
+    "due_at": "2026-08-30T18:00:00",
+    "recurrence": "none",
+    "enabled": true,
+    "snoozed_until": null,
+    "dismissed_occurrence": null
+  }
+]
+```
+
+| Field                  | Required | Notes                                                     |
+| ---------------------- | -------- | --------------------------------------------------------- |
+| `id`                   | yes      | Non-empty string, unique within the file                   |
+| `text`                 | yes      | Non-empty after trimming                                   |
+| `due_at`               | yes      | Local `YYYY-MM-DDTHH:MM:SS`; the first occurrence          |
+| `recurrence`           | no       | `none`, `daily` or `weekly`; defaults to `none`            |
+| `enabled`              | no       | `true` or `false`, defaults to `true`                      |
+| `snoozed_until`        | no       | Local datetime or `null`; hides it until then              |
+| `dismissed_occurrence` | no       | Local datetime or `null`; the occurrence already dealt with |
+
+`[]` is a valid file. Malformed data is reported as a plain message on stderr
+rather than a traceback — bad JSON, a non-array root, a missing or blank `id`,
+`text` or `due_at`, a malformed or timezone-aware datetime, an unsupported
+recurrence, a non-boolean `enabled`, duplicate ids. Nothing is silently
+discarded: the first problem stops that file from loading, because a reminder
+quietly skipped is a reminder that never fires.
+
+### Where reminders are read from
+
+Highest priority first, and the chain is short:
+
+1. a path supplied explicitly by a caller (`config.load_reminder_store(path)`)
+2. the file named by `[reminders].file` in your `config.toml`
+3. `~/.config/rem-bubbles/reminders.json` — the default personal collection
+4. no reminders
+
+Unlike quotes there is **no repository fallback at all**. There is no
+checkout-local reminder file in the chain and `examples/reminders.json` is never
+loaded: it documents the schema, nothing more. You must never be shown a sample
+reminder as though you had scheduled it.
+
+A missing reminder file is the normal state before your first `reminder add`
+and is silent. A file you deliberately pointed somewhere else and which is not
+there gets a line on stderr. Malformed data is reported and then stepped over
+with an empty collection: reminders are an addition to the bubble, not a
+precondition for it, so broken reminder data never costs you your quotes. The
+GUI always opens.
+
+Management commands are stricter — malformed configuration or malformed
+reminder data exits 1 and writes nothing, because there the risk is corrupting
+personal data rather than showing one fewer thing.
+
+### The running bubble does not reload reminders either
+
+The Milestone 3 limitation applies to reminders too. `rem-bubbles reminder add`
+while the bubble is already running does not reach that running instance;
+restart it to pick the change up. Snooze and Dismiss performed *by* the running
+window do update its own collection and are persisted immediately. There is no
+filesystem watching yet.
+
 ## Tests
 
-Nothing in the quote engine, the configuration layer or the CLI needs GTK,
-Wayland or a display server, so the whole suite runs anywhere:
+Nothing in the quote engine, the reminder engine, the configuration layer or the
+CLI needs GTK, Wayland or a display server, so the whole suite runs anywhere:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests
 ```
 
 The tests use temporary directories and a temporary `XDG_CONFIG_HOME`
-throughout; they never read or write your real `~/.config/rem-bubbles`.
+throughout; they never read or write your real `~/.config/rem-bubbles`. No test
+changes the system clock either: every time-dependent method takes an optional
+`now`, so recurrence, snooze expiry and overdue states are all exercised with
+explicit datetimes.
 
 ## Layout
 
 ```text
-src/rem_bubbles/cli.py          command parsing, quote management, GUI dispatch
-src/rem_bubbles/app.py          application lifecycle, CSS loading, GTK entry point
-src/rem_bubbles/bubble.py       layer-shell window, collapsed/expanded UI, transitions
-src/rem_bubbles/quote_store.py  quote parsing, validation, daily selection, navigation, persistence
-src/rem_bubbles/config.py       XDG paths, config.toml, quote source resolution
-assets/style.css                all styling
-examples/config.toml            sample configuration
-examples/quotes.json            sample quote collection
-tests/                          quote engine, config, CLI (no display server needed)
+src/rem_bubbles/cli.py             command parsing, quote and reminder management, GUI dispatch
+src/rem_bubbles/app.py             application lifecycle, CSS loading, GTK entry point
+src/rem_bubbles/bubble.py          layer-shell window, bubble/quote/reminder UI, the 30s check
+src/rem_bubbles/quote_store.py     quote parsing, validation, daily selection, navigation, persistence
+src/rem_bubbles/reminder_store.py  reminder parsing, validation, recurrence, due state, snooze, dismissal
+src/rem_bubbles/config.py          XDG paths, config.toml, quote and reminder source resolution
+src/rem_bubbles/persistence.py     the atomic file replace both collections share
+assets/style.css                   all styling
+examples/config.toml               sample configuration
+examples/quotes.json               sample quote collection
+examples/reminders.json            sample reminder collection (schema documentation only)
+tests/                             quote engine, reminder engine, config, CLI (no display server needed)
 ```
 
-`cli.py`, `config.py` and `quote_store.py` import no GTK. Presentation stays in
-`bubble.py`; quote data — both reading and writing — stays in `quote_store.py`,
-so the on-disk format has exactly one home.
+`cli.py`, `config.py`, `quote_store.py`, `reminder_store.py` and
+`persistence.py` import no GTK. Presentation stays in `bubble.py`; quote data
+stays in `quote_store.py` and reminder data in `reminder_store.py`, both
+directions, so each on-disk format has exactly one home. The window never does
+calendar arithmetic — it asks "what is due now?" and renders the answer.
+
+Writes go through `persistence.write_text_atomic()`: serialise, re-parse to
+prove the result would survive a reload, write to a temporary file in the same
+directory, then `os.replace()` it into place. An interrupted or failed write
+leaves the existing file exactly as it was. The reminder store persists
+*before* it mutates in memory, so a dismiss that cannot reach the disk leaves
+the reminder visibly still due rather than pretending it was handled.
 
 The console script is `rem_bubbles.cli:main`, not the GTK application, because
 it has to be importable with no display server. `cli.py` imports

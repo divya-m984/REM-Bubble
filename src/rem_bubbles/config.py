@@ -1,14 +1,20 @@
-"""Where REM Bubbles keeps its configuration, and where quotes come from.
+"""Where REM Bubbles keeps its configuration, and where its data comes from.
 
 Two responsibilities live here, both GTK-free:
 
 * resolving the user's configuration directory, following the XDG Base
   Directory convention, and reading the small ``config.toml`` inside it;
-* turning that into an ordered list of quote sources for the application.
+* turning that into quote sources and a reminder source for the application.
 
 ``tomllib`` is standard library from Python 3.11, so minimal configuration
 support costs no dependency. This is still not a settings framework: the only
-recognised key is ``[quotes].file``.
+recognised keys are ``[quotes].file`` and ``[reminders].file``, and both are
+optional — a Milestone 3 config naming only quotes stays valid untouched.
+
+Quotes and reminders resolve differently on purpose. A quote collection falls
+back through repository data so the bubble always has something to show; a
+reminder collection never does, because showing a user an example reminder as
+though it were their own would be a lie about their day.
 
 Nothing in this module writes to the filesystem — creating the config directory
 is the CLI's job, so that merely launching the bubble never leaves files behind.
@@ -23,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rem_bubbles.quote_store import QuoteStore, QuoteStoreError
+from rem_bubbles.reminder_store import ReminderStore, ReminderStoreError
 
 __all__ = [
     "APP_DIR_NAME",
@@ -32,13 +39,18 @@ __all__ = [
     "EXAMPLE_QUOTES",
     "LOCAL_QUOTES",
     "QUOTES_FILENAME",
+    "REMINDERS_FILENAME",
     "REPO_ROOT",
     "UserConfig",
     "default_quote_file",
+    "default_reminder_file",
     "load_quote_store",
+    "load_reminder_store",
     "managed_quote_file",
+    "managed_reminder_file",
     "quote_file_candidates",
     "read_user_config",
+    "reminder_file",
     "user_config_dir",
     "user_config_file",
 ]
@@ -48,9 +60,15 @@ APP_DIR_NAME = "rem-bubbles"
 
 CONFIG_FILENAME = "config.toml"
 QUOTES_FILENAME = "quotes.json"
+REMINDERS_FILENAME = "reminders.json"
 
-#: What ``rem-bubbles init`` writes when no config file exists yet.
-DEFAULT_CONFIG_TEXT = f'[quotes]\nfile = "{QUOTES_FILENAME}"\n'
+#: What ``rem-bubbles init`` writes when no config file exists yet. Both tables
+#: name their default location, so the file documents itself; neither is
+#: required, and an existing config is never rewritten to add the second one.
+DEFAULT_CONFIG_TEXT = (
+    f'[quotes]\nfile = "{QUOTES_FILENAME}"\n'
+    f'\n[reminders]\nfile = "{REMINDERS_FILENAME}"\n'
+)
 
 #: Repository checkout root, as seen from ``src/rem_bubbles/config.py``.
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -97,6 +115,11 @@ def default_quote_file() -> Path:
     return user_config_dir() / QUOTES_FILENAME
 
 
+def default_reminder_file() -> Path:
+    """``<config dir>/reminders.json`` — the personal reminders' default home."""
+    return user_config_dir() / REMINDERS_FILENAME
+
+
 # -- config.toml ------------------------------------------------------------
 
 
@@ -104,16 +127,19 @@ def default_quote_file() -> Path:
 class UserConfig:
     """The result of consulting ``config.toml``.
 
-    ``quote_file`` is None when the file is absent or declares no quote path;
-    both mean "use the default location", which is not an error.
+    ``quote_file`` and ``reminder_file`` are None when the file is absent or
+    declares no such path; both mean "use the default location", which is not an
+    error. In particular a Milestone 3 config with only ``[quotes]`` is complete:
+    reminders simply live at their default path.
     """
 
     path: Path
     exists: bool
     quote_file: Path | None = None
+    reminder_file: Path | None = None
 
 
-def _resolve_quote_path(raw: str, config_file: Path) -> Path:
+def _resolve_path(raw: str, config_file: Path) -> Path:
     """Turn a configured ``file`` value into an absolute path.
 
     ``~`` is expanded, and a relative path is taken relative to the directory
@@ -126,6 +152,40 @@ def _resolve_quote_path(raw: str, config_file: Path) -> Path:
     # normpath rather than resolve(): tidy up ``..`` without following symlinks
     # or requiring the file to exist.
     return Path(os.path.normpath(candidate))
+
+
+def _table_file(
+    data: dict[str, object], table: str, config_file: Path
+) -> Path | None:
+    """Read ``[<table>].file`` from a decoded config, or None if not declared.
+
+    Both recognised tables have exactly this shape, so both are validated by the
+    same rules and produce the same messages. A table that is present but empty
+    is fine; a table that is the wrong type, or a ``file`` that is not a
+    non-blank string, is not — guessing past either could send a user's personal
+    data somewhere they did not ask for.
+    """
+    section = data.get(table)
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        raise ConfigError(
+            f"In {config_file}: [{table}] must be a table, "
+            f"but it is {type(section).__name__}."
+        )
+
+    raw_file = section.get("file")
+    if raw_file is None:
+        return None
+    if not isinstance(raw_file, str):
+        raise ConfigError(
+            f'In {config_file}: [{table}] "file" must be a string, '
+            f"but it is {type(raw_file).__name__}."
+        )
+    if not raw_file.strip():
+        raise ConfigError(f'In {config_file}: [{table}] "file" is blank.')
+
+    return _resolve_path(raw_file, config_file)
 
 
 def read_user_config(path: Path | str | None = None) -> UserConfig:
@@ -149,30 +209,11 @@ def read_user_config(path: Path | str | None = None) -> UserConfig:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"The config file {config_file} is not valid TOML: {exc}") from exc
 
-    quotes = data.get("quotes")
-    if quotes is None:
-        return UserConfig(path=config_file, exists=True)
-    if not isinstance(quotes, dict):
-        raise ConfigError(
-            f"In {config_file}: [quotes] must be a table, "
-            f"but it is {type(quotes).__name__}."
-        )
-
-    raw_file = quotes.get("file")
-    if raw_file is None:
-        return UserConfig(path=config_file, exists=True)
-    if not isinstance(raw_file, str):
-        raise ConfigError(
-            f'In {config_file}: [quotes] "file" must be a string, '
-            f"but it is {type(raw_file).__name__}."
-        )
-    if not raw_file.strip():
-        raise ConfigError(f'In {config_file}: [quotes] "file" is blank.')
-
     return UserConfig(
         path=config_file,
         exists=True,
-        quote_file=_resolve_quote_path(raw_file, config_file),
+        quote_file=_table_file(data, "quotes", config_file),
+        reminder_file=_table_file(data, "reminders", config_file),
     )
 
 
@@ -186,6 +227,18 @@ def managed_quote_file(config: UserConfig | None = None) -> Path:
     """
     config = config if config is not None else read_user_config()
     return config.quote_file or default_quote_file()
+
+
+def managed_reminder_file(config: UserConfig | None = None) -> Path:
+    """The personal reminder file the CLI reads and writes.
+
+    ``[reminders].file`` when the user declared one, otherwise
+    ``<config dir>/reminders.json``. There is no repository fallback at all, in
+    either direction: nothing in the checkout is ever read as real reminders and
+    nothing in it is ever written to.
+    """
+    config = config if config is not None else read_user_config()
+    return config.reminder_file or default_reminder_file()
 
 
 # -- runtime quote sources --------------------------------------------------
@@ -264,3 +317,65 @@ def load_quote_store(explicit: Path | str | None = None) -> QuoteStore:
         file=sys.stderr,
     )
     return QuoteStore.emergency()
+
+
+# -- runtime reminder source ------------------------------------------------
+
+
+def reminder_file(explicit: Path | str | None = None) -> Path:
+    """The one file reminders are read from, highest priority first.
+
+    1. ``explicit`` — a path handed in by a caller.
+    2. the file named by ``[reminders].file`` in the user's ``config.toml``.
+    3. ``<config dir>/reminders.json`` — the default personal collection.
+
+    The chain stops there. Unlike quotes there is no checkout-local file and no
+    ``examples/`` fallback, because a reminder is a claim about the user's own
+    life: sample data must never appear as though someone had scheduled it.
+
+    Raises :class:`ConfigError` if ``config.toml`` is malformed.
+    """
+    if explicit is not None:
+        return Path(explicit)
+    return read_user_config().reminder_file or default_reminder_file()
+
+
+def load_reminder_store(explicit: Path | str | None = None) -> ReminderStore:
+    """Load the user's reminders, degrading to an empty collection on any fault.
+
+    A missing file is the normal state before the first ``reminder add`` and is
+    silent — but only at the default location. A path the user deliberately
+    pointed somewhere else and which is not there is worth a line on stderr,
+    since it usually means a typo rather than a fresh install.
+
+    Every other failure is reported and then stepped over with an empty store.
+    Reminders are an addition to the bubble, not a precondition for it: broken
+    reminder data must never cost the user their quotes.
+    """
+    try:
+        path = reminder_file(explicit)
+        default = default_reminder_file()
+    except ConfigError as exc:
+        print(f"rem-bubbles: {exc}", file=sys.stderr)
+        print(
+            "rem-bubbles: ignoring the configured reminder path, starting with "
+            "no reminders",
+            file=sys.stderr,
+        )
+        return ReminderStore.empty()
+
+    if not path.is_file():
+        if path != default:
+            print(
+                f"rem-bubbles: configured reminder file not found: {path}",
+                file=sys.stderr,
+            )
+            print("rem-bubbles: starting with no reminders", file=sys.stderr)
+        return ReminderStore.empty(path)
+
+    try:
+        return ReminderStore.from_file(path)
+    except ReminderStoreError as exc:
+        print(f"rem-bubbles: {exc}", file=sys.stderr)
+        print("rem-bubbles: starting with no reminders", file=sys.stderr)
+        return ReminderStore.empty(path)

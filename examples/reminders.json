@@ -1,0 +1,29 @@
+[
+  {
+    "id": "submit-the-report",
+    "text": "Submit the report.",
+    "due_at": "2026-08-30T18:00:00",
+    "recurrence": "none",
+    "enabled": true,
+    "snoozed_until": null,
+    "dismissed_occurrence": null
+  },
+  {
+    "id": "stand-up",
+    "text": "Stand up and look at something far away.",
+    "due_at": "2026-08-30T11:00:00",
+    "recurrence": "daily",
+    "enabled": true,
+    "snoozed_until": null,
+    "dismissed_occurrence": null
+  },
+  {
+    "id": "review-my-week",
+    "text": "Review my week.",
+    "due_at": "2026-08-31T09:00:00",
+    "recurrence": "weekly",
+    "enabled": false,
+    "snoozed_until": null,
+    "dismissed_occurrence": null
+  }
+]

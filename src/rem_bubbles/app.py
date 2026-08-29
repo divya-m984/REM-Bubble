@@ -23,7 +23,7 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, Gtk
 
 from rem_bubbles.bubble import BubbleWindow
-from rem_bubbles.config import load_quote_store
+from rem_bubbles.config import load_quote_store, load_reminder_store
 
 APP_ID = "dev.rembubbles.RemBubbles"
 
@@ -58,9 +58,15 @@ class RemBubblesApp(Gtk.Application):
 
     def do_activate(self) -> None:
         if self._window is None:
-            # load_quote_store() reports its own failures and always returns a
-            # usable store, so a broken quote file cannot stop the window.
-            self._window = BubbleWindow(application=self, store=load_quote_store())
+            # Both loaders report their own failures and always return a usable
+            # store, so neither a broken quote file nor a broken reminder file
+            # can stop the window opening. A missing reminder file is not even a
+            # failure — it is the normal state before the first reminder.
+            self._window = BubbleWindow(
+                application=self,
+                store=load_quote_store(),
+                reminders=load_reminder_store(),
+            )
         self._window.present()
 
     def _load_css(self) -> None:
