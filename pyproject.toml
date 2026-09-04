@@ -4,15 +4,34 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rem-bubbles"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A tiny persistent desktop quote and reminder companion for Wayland."
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["wayland", "hyprland", "gtk", "desktop", "reminder", "quote", "layer-shell"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "Natural Language :: English",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Desktop Environment",
+    "Topic :: Utilities",
+]
 
 # GTK4, PyGObject and gtk4-layer-shell are provided by the system (the venv is
 # created with --system-site-packages). They are deliberately not listed here:
 # pip would try to build PyGObject from source instead of using the distro one.
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/divya-m984/REM-Bubble"
+Repository = "https://github.com/divya-m984/REM-Bubble.git"
+Issues = "https://github.com/divya-m984/REM-Bubble/issues"
+Changelog = "https://github.com/divya-m984/REM-Bubble/blob/main/CHANGELOG.md"
 
 # The entry point is the CLI dispatcher, not the GTK application: it must be
 # importable with no display server. Running it with no command launches the
@@ -25,3 +44,6 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "rem_bubbles.__version__" }
